@@ -11,6 +11,7 @@ blocks:
         - name: compile
           commands:
             - checkout
+            - git submodule update --recursive
             - git pull --recurse-submodules
             - '#sem-version cpp 7'
             - g++ --version
