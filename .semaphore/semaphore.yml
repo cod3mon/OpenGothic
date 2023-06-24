@@ -18,5 +18,8 @@ blocks:
             - sudo apt install -y vulkan-sdk
             - '# distro-provided packages'
             - sudo apt install -y git cmake g++ glslang-tools libvulkan-dev libasound2-dev libx11-dev libxcursor-dev
+            - '#Recurse submodules'
+            - git pull --recurse-submodules
+            - '#Compile'
             - 'cmake -B build -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo'
             - make -C build -j $(nproc)
