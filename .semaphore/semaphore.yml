@@ -1,0 +1,22 @@
+version: v1.0
+name: Initial Pipeline
+agent:
+  machine:
+    type: e1-standard-2
+    os_image: ubuntu2004
+blocks:
+  - name: 'Block #1'
+    task:
+      jobs:
+        - name: Compile
+          commands:
+            - checkout
+            - '# latest Vulkan SDK provided externally as Ubuntu packages are usually older'
+            - 'wget -qO - http://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -'
+            - 'sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-focal.list http://packages.lunarg.com/vulkan/lunarg-vulkan-focal.list'
+            - sudo apt update
+            - sudo apt install vulkan-sdk
+            - '# distro-provided packages'
+            - sudo apt install git cmake g++ glslang-tools libvulkan-dev libasound2-dev libx11-dev libxcursor-dev
+            - 'cmake -B build -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo'
+            - make -C build -j $(nproc)
