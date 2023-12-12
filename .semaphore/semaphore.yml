@@ -26,3 +26,4 @@ blocks:
             - make -C build -j $(nproc)
             - find . -type f -name *.o
             - find . -type f | grep Gothic2Notr
+            - artifact push job build/opengothic
