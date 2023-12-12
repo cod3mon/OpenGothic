@@ -64,6 +64,8 @@ GameSession::GameSession(std::string file) {
   setTime(gtime(8,0));
 
   vm.reset(new GameScript(*this));
+  initPerceptions();
+
   setWorld(std::unique_ptr<World>(new World(*this,std::move(file),true,[&](int v){
     Gothic::inst().setLoadingProgress(int(v*0.55));
     })));
@@ -176,7 +178,7 @@ void GameSession::save(Serialize &fout, std::string_view name, const Pixmap& scr
     fout.write(i.name);
   }
 
-  fout.setEntry("priview.png");
+  fout.setEntry("preview.png");
   fout.write(screen);
 
   fout.setEntry("game/session");
@@ -247,11 +249,23 @@ WorldView *GameSession::view() const {
   }
 
 Tempest::SoundEffect GameSession::loadSound(const Tempest::Sound &raw) {
-  return sound.load(raw);
+  try {
+    return sound.load(raw);
+    }
+  catch(std::bad_alloc&) {
+    Tempest::Log::d("Exceeding OpenAL source limit");
+    return Tempest::SoundEffect();
+    }
   }
 
 Tempest::SoundEffect GameSession::loadSound(const SoundFx &fx, bool& looped) {
-  return fx.getEffect(sound,looped);
+  try {
+    return fx.load(sound,looped);
+    }
+  catch(std::bad_alloc&) {
+    Tempest::Log::d("Exceeding OpenAL source limit");
+    return Tempest::SoundEffect();
+    }
   }
 
 Npc* GameSession::player() {
@@ -278,6 +292,7 @@ void GameSession::tick(uint64_t dt) {
 
   wrldTime.addMilis(add/divTime);
 
+  vm->tick(dt);
   wrld->tick(dt);
   // std::this_thread::sleep_for(std::chrono::milliseconds(60));
 
@@ -343,6 +358,7 @@ auto GameSession::implChangeWorld(std::unique_ptr<GameSession>&& game,
     Gothic::inst().setLoadingProgress(v);
     };
 
+  initPerceptions();
   std::unique_ptr<World> ret = std::unique_ptr<World>(new World(*this,w,wss.isEmpty(),loadProgress));
   setWorld(std::move(ret));
 
@@ -430,22 +446,28 @@ bool GameSession::isWorldKnown(std::string_view name) const {
   return false;
   }
 
+void GameSession::initPerceptions() {
+  // NOTE: world is null at this point and most scrip-api will be prone to crash
+  if(vm->hasSymbolName("initPerceptions"))
+    vm->getVm().call_function("initPerceptions");
+  }
+
 void GameSession::initScripts(bool firstTime) {
   auto wname = wrld->name();
   auto dot   = wname.rfind('.');
   auto name  = (dot==std::string::npos ? wname : wname.substr(0,dot));
 
-  if(vm->hasSymbolName("startup_global"))
-    vm->getVm().call_function("startup_global");
-
-  if(vm->hasSymbolName("init_global"))
-    vm->getVm().call_function("init_global");
-
   if(firstTime) {
+    if(vm->hasSymbolName("startup_global"))
+      vm->getVm().call_function("startup_global");
+
     string_frm startup("startup_", name);
     if(vm->hasSymbolName(startup))
       vm->getVm().call_function(startup);
     }
+
+  if(vm->hasSymbolName("init_global"))
+    vm->getVm().call_function("init_global");
 
   string_frm init("init_",name);
   if(vm->hasSymbolName(init))

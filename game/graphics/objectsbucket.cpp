@@ -12,17 +12,6 @@
 
 using namespace Tempest;
 
-static uint32_t nextPot(uint32_t v) {
-  v--;
-  v |= v >> 1;
-  v |= v >> 2;
-  v |= v >> 4;
-  v |= v >> 8;
-  v |= v >> 16;
-  v++;
-  return v;
-  }
-
 static Matrix4x4 dummyMatrix() {
   auto mat = Matrix4x4::mkIdentity();
   mat.set(0,0, 0.f);
@@ -31,6 +20,19 @@ static Matrix4x4 dummyMatrix() {
   // so bbox test will fail
   mat.set(3,1, -1000000.f);
   return mat;
+  }
+
+static RtScene::Category toRtCategory(ObjectsBucket::Type t) {
+  switch (t) {
+    case ObjectsBucket::LandscapeShadow: return RtScene::None;
+    case ObjectsBucket::Landscape:       return RtScene::Landscape;
+    case ObjectsBucket::Static:          return RtScene::Static;
+    case ObjectsBucket::Movable:         return RtScene::Movable;
+    case ObjectsBucket::Animated:        return RtScene::None;
+    case ObjectsBucket::Pfx:             return RtScene::None;
+    case ObjectsBucket::Morph:           return RtScene::None;
+    }
+  return RtScene::None;
   }
 
 void ObjectsBucket::Item::setObjMatrix(const Tempest::Matrix4x4 &mt) {
@@ -151,6 +153,14 @@ void ObjectsBucket::Descriptors::alloc(ObjectsBucket& owner) {
   }
 
 
+void ObjectsBucket::InstanceDesc::setPosition(const Tempest::Matrix4x4& m) {
+  //std::memcpy(pos, m.data(), sizeof(pos));
+  for(int i=0; i<4; ++i)
+    for(int r=0; r<3; ++r)
+      pos[i][r] = m.at(i,r);
+  }
+
+
 ObjectsBucket::ObjectsBucket(const Type type, const Material& mat, VisualObjects& owner, const SceneGlobals& scene,
                              const StaticMesh* stMesh, const AnimMesh* anim, const Tempest::StorageBuffer* desc)
   :objType(type), owner(owner), scene(scene), mat(mat) {
@@ -162,15 +172,15 @@ ObjectsBucket::ObjectsBucket(const Type type, const Material& mat, VisualObjects
 
   useSharedUbo        = (mat.frames.size()==0);
   textureInShadowPass = (mat.alpha==Material::AlphaTest);
-  usePositionsSsbo    = (type==Type::Static || type==Type::Movable || type==Type::Morph);
-  useMeshlets         = (Gothic::inst().doMeshShading() && !mat.isTesselated() && (type!=Type::Pfx));
+  usePositionsSsbo    = (type==Type::Static || type==Type::Movable || type==Type::Animated || type==Type::Morph);
+  useMeshlets         = (Gothic::options().doMeshShading && !mat.isTesselated() && (type!=Type::Pfx));
 
   pMain               = Shaders::inst().materialPipeline(mat,objType, isForwardShading() ? Shaders::T_Forward : Shaders::T_Deffered);
   pShadow             = Shaders::inst().materialPipeline(mat,objType, Shaders::T_Shadow);
 
   if(useSharedUbo) {
     uboShared.alloc(*this);
-    bucketShared = allocBucketDesc(mat);
+    bucketShared = allocBucketDesc(Bounds(),mat);
     uboSetCommon(uboShared,mat,bucketShared);
     }
   }
@@ -190,7 +200,7 @@ bool ObjectsBucket::isCompatible(const Type t, const Material& mat,
     }
 
   if(type==Landscape) {
-    if(Gothic::inst().doMeshShading()) {
+    if(Gothic::options().doMeshShading) {
       return objType==type && mat.alpha==this->mat.alpha && desc==instanceDesc;
       }
     return mat==this->mat;
@@ -241,15 +251,6 @@ const void* ObjectsBucket::meshPointer() const {
   return animMesh;
   }
 
-BufferHeap ObjectsBucket::ssboHeap() const {
-  if(windAnim)
-    return BufferHeap::Upload;
-  auto heap = BufferHeap::Upload;
-  if(objType==Type::Landscape || objType==Type::Static)
-    heap = BufferHeap::Device;
-  return heap;
-  }
-
 ObjectsBucket::Object& ObjectsBucket::implAlloc(const Bounds& bounds, const Material& /*mat*/) {
   Object* v = nullptr;
   for(size_t i=0; i<CAPACITY; ++i) {
@@ -278,61 +279,87 @@ ObjectsBucket::Object& ObjectsBucket::implAlloc(const Bounds& bounds, const Mate
   v->visibility.setObject(&visSet,size_t(std::distance(val,v)));
   v->skiningAni = nullptr;
   v->isValid    = true;
+
+  valLen = std::max(valLen, size_t(std::distance(val,v)+1));
   reallocObjPositions();
 
   return *v;
   }
 
-void ObjectsBucket::postAlloc(Object& obj, size_t /*objId*/) {
+void ObjectsBucket::postAlloc(Object& obj, size_t objId) {
   if(objType!=Pfx && useMeshlets) {
     assert(obj.iboOffset%PackedMesh::MaxInd==0);
     assert(obj.iboLength%PackedMesh::MaxInd==0);
     }
+  if(objType==Morph) {
+    for(auto& i:obj.morphAnim)
+      i = MorphAnim();
+    MorphData d ={};
+    objMorphAnim.set(&d, objId*sizeof(d), sizeof(d));
+    }
+  updateInstance(objId, obj);
   invalidateInstancing();
   }
 
 void ObjectsBucket::implFree(const size_t objId) {
   auto& v = val[objId];
   if(v.blas!=nullptr)
-    owner.resetTlas();
+    owner.notifyTlas(material(objId), toRtCategory(objType));
 
   v.visibility = VisibilityGroup::Token();
   v.isValid    = false;
   for(size_t i=0;i<Resources::MaxFramesInFlight;++i)
     v.pfx[i] = nullptr;
   v.blas = nullptr;
+  v.pos  = dummyMatrix();
   valSz--;
   visSet.erase(objId);
 
+  valLen = 0;
+  for(size_t i=CAPACITY; i>1; --i)
+    if(val[i-1].isValid) {
+      valLen = i;
+      break;
+      }
+
   if(valSz==0) {
     owner.resetIndex();
-    objPositions = MatrixStorage::Id();
-    } else {
-    objPositions.set(dummyMatrix(),objId);
+    objInstances = InstanceStorage::Id();
+    objMorphAnim = InstanceStorage::Id();
     }
+
+  updateInstance(objId, v);
   invalidateInstancing();
   }
 
-ObjectsBucket::Bucket ObjectsBucket::allocBucketDesc(const Material& mat) {
+ObjectsBucket::Bucket ObjectsBucket::allocBucketDesc(const Bounds& bounds, const Material& mat) {
   auto& device = Resources::device();
 
   BucketDesc ubo;
   ubo.texAniMapDirPeriod = mat.texAniMapDirPeriod;
   ubo.waveMaxAmplitude   = mat.waveMaxAmplitude;
-  if(staticMesh!=nullptr) {
+  ubo.alphaWeight        = mat.alphaWeight;
+  ubo.envMapping         = mat.envMapping;
+  if(bounds.r>0) {
+    auto& bbox     = bounds.bbox;
+    ubo.bboxRadius = bounds.rConservative;
+    ubo.bbox[0]    = Vec4(bbox[0].x,bbox[0].y,bbox[0].z,0.f);
+    ubo.bbox[1]    = Vec4(bbox[1].x,bbox[1].y,bbox[1].z,0.f);
+    }
+  else if(staticMesh!=nullptr) {
     auto& bbox     = staticMesh->bbox.bbox;
     ubo.bboxRadius = staticMesh->bbox.rConservative;
     ubo.bbox[0]    = Vec4(bbox[0].x,bbox[0].y,bbox[0].z,0.f);
     ubo.bbox[1]    = Vec4(bbox[1].x,bbox[1].y,bbox[1].z,0.f);
     }
-  if(animMesh!=nullptr) {
+  else if(animMesh!=nullptr) {
     auto& bbox     = animMesh->bbox.bbox;
     ubo.bboxRadius = animMesh->bbox.rConservative;
     ubo.bbox[0]    = Vec4(bbox[0].x,bbox[0].y,bbox[0].z,0.f);
     ubo.bbox[1]    = Vec4(bbox[1].x,bbox[1].y,bbox[1].z,0.f);
     }
 
-  return device.ubo<BucketDesc>(BufferHeap::Device,&ubo,1);
+  return device.ubo<BucketDesc>(BufferHeap::Device,ubo);
   }
 
 void ObjectsBucket::uboSetCommon(Descriptors& v, const Material& mat, const Bucket& bucket) {
@@ -358,7 +385,8 @@ void ObjectsBucket::uboSetCommon(Descriptors& v, const Material& mat, const Buck
           }
         }
       if(lay==SceneGlobals::V_Main || textureInShadowPass) {
-        ubo.set(L_Diffuse, *mat.tex);
+        auto smp = (lay==SceneGlobals::V_Main) ? Sampler::anisotrophy() : Sampler::trillinear();
+        ubo.set(L_Diffuse, *mat.tex, smp);
         }
       if(lay==SceneGlobals::V_Main && isShadowmapRequired()) {
         ubo.set(L_Shadow0,  *scene.shadowMap[0],Resources::shadowSampler());
@@ -382,16 +410,13 @@ void ObjectsBucket::uboSetCommon(Descriptors& v, const Material& mat, const Buck
         smp.setClamping(ClampMode::ClampToEdge);
         ubo.set(L_HiZ, *scene.hiZ, smp);
         }
-      if(lay==SceneGlobals::V_Main && mat.alpha==Material::Water) {
-        ubo.set(L_SkyLut, *scene.skyLut);
-        }
       }
     uboSetSkeleton(v,fId);
     }
   }
 
 void ObjectsBucket::uboSetSkeleton(Descriptors& v, uint8_t fId) {
-  auto& ssbo = owner.matrixSsbo(ssboHeap(),fId);
+  auto& ssbo = owner.instanceSsbo();
   if(ssbo.byteSize()==0 || objType==Type::Landscape || objType==Type::LandscapeShadow || objType==Type::Pfx)
     return;
 
@@ -422,7 +447,7 @@ ObjectsBucket::Descriptors& ObjectsBucket::objUbo(size_t objId) {
   return uboShared;
   }
 
-void ObjectsBucket::setupUbo() {
+void ObjectsBucket::prepareUniforms() {
   uboSetCommon(uboShared,mat,bucketShared);
   }
 
@@ -431,53 +456,26 @@ void ObjectsBucket::invalidateUbo(uint8_t fId) {
     uboSetSkeleton(uboShared,fId);
   }
 
-void ObjectsBucket::fillTlas(std::vector<RtInstance>& inst, std::vector<uint32_t>& iboOff, Bindless& out) {
+void ObjectsBucket::fillTlas(RtScene& out) {
   for(size_t i=0; i<CAPACITY; ++i) {
     auto& v = val[i];
     if(!v.isValid || v.blas==nullptr)
       continue;
-
-    if(mat.tex!=out.tex.back() ||
-       &staticMesh->vbo!=out.vbo.back() ||
-       &staticMesh->ibo!=out.ibo.back() ||
-       uint32_t(v.iboOffset/3)!=iboOff.back()) {
-      out.tex.push_back(mat.tex);
-      out.vbo.push_back(&staticMesh->vbo);
-      out.ibo.push_back(&staticMesh->ibo);
-      iboOff.push_back(uint32_t(v.iboOffset/3));
-      }
-
-    RtInstance ix;
-    ix.mat  = v.pos;
-    ix.id   = uint32_t(out.tex.size()-1);
-    ix.blas = v.blas;
-    if(mat.alpha!=Material::Solid)
-      ix.flags = Tempest::RtInstanceFlags::NonOpaque;
-    inst.push_back(ix);
+    out.addInstance(v.pos, *v.blas, mat, *staticMesh, v.iboOffset, v.iboLength, toRtCategory(objType));
     }
   }
 
-void ObjectsBucket::preFrameUpdate(uint8_t fId) {
+void ObjectsBucket::preFrameUpdateWind(uint8_t fId, const bool* upd) {
   if(!windAnim || !scene.zWindEnabled)
     return;
-
-  bool upd[CAPACITY] = {};
-  for(uint8_t ic=0; ic<SceneGlobals::V_Count; ++ic) {
-    const auto    c     = SceneGlobals::VisCamera(ic);
-    const size_t  indSz = visSet.count(c);
-    const size_t* index = visSet.index(c);
-    for(size_t i=0; i<indSz; ++i)
-      upd[index[i]] = true;
-    }
-
-  for(size_t i=0; i<CAPACITY; ++i) {
+  for(size_t i=0; i<valLen; ++i) {
     auto& v = val[i];
     if(upd[i] && v.wind!=phoenix::animation_mode::none) {
       auto  pos   = v.pos;
       float shift = v.pos[3][0]*scene.windDir.x + v.pos[3][2]*scene.windDir.y;
 
-      static const uint64_t preiod = scene.windPeriod;
-      float a = float(scene.tickCount%preiod)/float(preiod);
+      static const uint64_t period = scene.windPeriod;
+      float a = float(scene.tickCount%period)/float(period);
       a = a*2.f-1.f;
       a = std::cos(float(a*M_PI) + shift*0.0001f);
 
@@ -502,9 +500,59 @@ void ObjectsBucket::preFrameUpdate(uint8_t fId) {
         }
       pos[1][0] += scene.windDir.x*a;
       pos[1][2] += scene.windDir.y*a;
-      objPositions.set(pos,i);
+      updateInstance(i, v);
       }
     }
+  }
+
+void ObjectsBucket::preFrameUpdateMorph(uint8_t fId, const bool* upd) {
+  if(objType!=Morph)
+    return;
+  for(size_t i=0; i<valLen; ++i) {
+    auto& v = val[i];
+    if(!upd[i])
+      continue;
+
+    MorphData data = {};
+    for(size_t i=0; i<Resources::MAX_MORPH_LAYERS; ++i) {
+      auto&    ani  = v.morphAnim[i];
+      auto&    anim = (*staticMesh->morph.anim)[ani.id];
+      uint64_t time = (scene.tickCount-ani.timeStart);
+
+      float    alpha     = float(time%anim.tickPerFrame)/float(anim.tickPerFrame);
+      float    intensity = ani.intensity;
+
+      if(scene.tickCount>ani.timeUntil) {
+        data.morph[i].intensity = 0;
+        continue;
+        }
+
+      const uint32_t samplesPerFrame = uint32_t(anim.samplesPerFrame);
+      data.morph[i].indexOffset = uint32_t(anim.index);
+      data.morph[i].sample0     = uint32_t((time/anim.tickPerFrame+0)%anim.numFrames)*samplesPerFrame;
+      data.morph[i].sample1     = uint32_t((time/anim.tickPerFrame+1)%anim.numFrames)*samplesPerFrame;
+      data.morph[i].alpha       = uint16_t(alpha*uint16_t(-1));
+      data.morph[i].intensity   = uint16_t(intensity*uint16_t(-1));
+      }
+    objMorphAnim.set(&data, i*sizeof(data), sizeof(data));
+    }
+  }
+
+void ObjectsBucket::preFrameUpdate(uint8_t fId) {
+  if((!windAnim || !scene.zWindEnabled) && objType!=Morph)
+    return;
+
+  bool upd[CAPACITY] = {};
+  for(uint8_t ic=0; ic<SceneGlobals::V_Count; ++ic) {
+    const auto    c     = SceneGlobals::VisCamera(ic);
+    const size_t  indSz = visSet.count(c);
+    const size_t* index = visSet.index(c);
+    for(size_t i=0; i<indSz; ++i)
+      upd[index[i]] = true;
+    }
+
+  preFrameUpdateWind (fId, upd);
+  preFrameUpdateMorph(fId, upd);
   }
 
 size_t ObjectsBucket::alloc(const StaticMesh& mesh, size_t iboOffset, size_t iboLen,
@@ -513,37 +561,32 @@ size_t ObjectsBucket::alloc(const StaticMesh& mesh, size_t iboOffset, size_t ibo
   v->iboOffset = iboOffset;
   v->iboLength = iboLen;
 
-  bool useBlas = true;
-  if(mat.alpha==Material::Solid && objType==Type::Landscape)
-    useBlas = false; // handles separetly
-
-  if(objType!=Type::Landscape && objType!=Type::Static)
-    useBlas = false; // not supported
+  bool useBlas = toRtCategory(objType)!=RtScene::None;
   if(mat.isGhost)
     useBlas = false;
   if(mat.alpha!=Material::Solid && mat.alpha!=Material::AlphaTest && mat.alpha!=Material::Transparent)
     useBlas = false;
 
   if(useBlas) {
-    for(auto& i:mesh.sub)
-      if(i.iboOffset==iboOffset && i.iboLength==iboLen && !i.blas.isEmpty()) {
-        v->blas = &i.blas;
-        owner.resetTlas();
-        break;
-        }
+    if(auto b = mesh.blas(iboOffset, iboLen)) {
+      v->blas = b;
+      owner.notifyTlas(mat, toRtCategory(objType));
+      }
     }
   postAlloc(*v,size_t(std::distance(val,v)));
   return size_t(std::distance(val,v));
   }
 
 size_t ObjectsBucket::alloc(const AnimMesh& mesh, size_t iboOffset, size_t iboLen,
-                            const MatrixStorage::Id& anim) {
+                            const InstanceStorage::Id& anim) {
   Object* v = &implAlloc(mesh.bbox,mat);
   v->iboOffset  = iboOffset;
   v->iboLength  = iboLen;
   v->skiningAni = &anim;
-  postAlloc(*v,size_t(std::distance(val,v)));
-  return size_t(std::distance(val,v));
+
+  const auto id = size_t(std::distance(val,v));
+  postAlloc(*v,id);
+  return id;
   }
 
 size_t ObjectsBucket::alloc(const Bounds& bounds) {
@@ -586,9 +629,10 @@ void ObjectsBucket::drawCommon(Encoder<CommandBuffer>& cmd, uint8_t fId, const R
     return;
 
   if(useMeshlets) {
-    if(objType==Landscape && c==SceneGlobals::V_Shadow1 && !textureInShadowPass)
+    const bool isShadow = (c==SceneGlobals::V_Shadow0 || c==SceneGlobals::V_Shadow1 || isHiZPass);
+    if(objType==Landscape && isShadow)
       return;
-    if(objType==LandscapeShadow && c!=SceneGlobals::V_Shadow1)
+    if(objType==LandscapeShadow && !isShadow)
       return;
     }
 
@@ -623,24 +667,17 @@ void ObjectsBucket::drawCommon(Encoder<CommandBuffer>& cmd, uint8_t fId, const R
       case Movable:
       case Morph:
       case Animated: {
-        uint32_t instance = 0;
-        if(objType!=Animated)
-          instance = objPositions.offsetId()+uint32_t(id); else
-          instance = v.skiningAni->offsetId();
-
-        uint32_t cnt   = applyInstancing(i,index,indSz);
-        size_t   uboSz = (objType==Morph ? sizeof(UboPush) : sizeof(UboPushBase));
-
-        updatePushBlock(pushBlock,v,instance,cnt);
+        uint32_t instance = objInstances.offsetId<InstanceDesc>() + uint32_t(id);
+        uint32_t cnt      = applyInstancing(i,index,indSz);
+        updatePushBlock(pushBlock,v,instance,uint32_t(id),cnt);
         if(useMeshlets) {
-          cmd.setUniforms(shader, &pushBlock, uboSz);
+          cmd.setUniforms(shader, &pushBlock, sizeof(UboPush));
           cmd.dispatchMeshThreads(cnt);
-          // cmd.dispatchMesh(uint32_t(v.iboLength/PackedMesh::MaxInd), cnt);
           } else {
-          cmd.setUniforms(shader, &pushBlock, uboSz);
+          cmd.setUniforms(shader, &pushBlock, sizeof(UboPush));
           if(objType!=Animated)
-            cmd.draw(staticMesh->vbo, staticMesh->ibo, v.iboOffset, v.iboLength, instance, cnt); else
-            cmd.draw(animMesh  ->vbo, animMesh  ->ibo, v.iboOffset, v.iboLength, instance, cnt);
+            cmd.draw(staticMesh->vbo, staticMesh->ibo, v.iboOffset, v.iboLength, 0, cnt); else
+            cmd.draw(animMesh  ->vbo, animMesh  ->ibo, v.iboOffset, v.iboLength, 0, cnt);
           }
         break;
         }
@@ -652,12 +689,10 @@ void ObjectsBucket::setObjMatrix(size_t i, const Matrix4x4& m) {
   auto& v = val[i];
   v.visibility.setObjMatrix(m);
   v.pos = m;
-
-  if(objPositions.size()>0)
-    objPositions.set(m,i);
+  updateInstance(i, v);
 
   if(v.blas!=nullptr)
-    owner.resetTlas();
+    owner.notifyTlas(material(i), toRtCategory(objType));
   }
 
 void ObjectsBucket::setBounds(size_t i, const Bounds& b) {
@@ -721,6 +756,7 @@ void ObjectsBucket::startMMAnim(size_t i, std::string_view animName, float inten
 void ObjectsBucket::setFatness(size_t i, float f) {
   auto& v = val[i];
   v.fatness = f*0.5f;
+  updateInstance(i, v);
   invalidateInstancing();
   }
 
@@ -762,66 +798,54 @@ bool ObjectsBucket::isSceneInfoRequired() const {
   return mat.isSceneInfoRequired();
   }
 
-void ObjectsBucket::updatePushBlock(ObjectsBucket::UboPush& push, ObjectsBucket::Object& v, uint32_t instance, uint32_t instanceCount) {
-  push.meshletBase        = uint32_t(v.iboOffset/PackedMesh::MaxInd);
-  push.meshletPerInstance = int32_t (v.iboLength/PackedMesh::MaxInd);
-  push.firstInstance      = instance;
-  push.instanceCount      = instanceCount;
-  push.fatness            = v.fatness;
+void ObjectsBucket::updatePushBlock(ObjectsBucket::UboPush& push, ObjectsBucket::Object& v,
+                                    uint32_t instance, uint32_t id, uint32_t instanceCount) {
+  push.firstMeshlet  = uint32_t(v.iboOffset/PackedMesh::MaxInd);
+  push.meshletCount  = int32_t (v.iboLength/PackedMesh::MaxInd);
+  push.firstInstance = instance;
+  push.instanceCount = instanceCount;
+  }
 
-  if(objType==Morph) {
-    for(size_t i=0; i<Resources::MAX_MORPH_LAYERS; ++i) {
-      auto&    ani  = v.morphAnim[i];
-      auto&    anim = (*staticMesh->morph.anim)[ani.id];
-      uint64_t time = (scene.tickCount-ani.timeStart);
+void ObjectsBucket::updateInstance(size_t instance, const Object& v) {
+  if(objInstances.isEmpty())
+    return;
 
-      float    alpha     = float(time%anim.tickPerFrame)/float(anim.tickPerFrame);
-      float    intensity = ani.intensity;
-
-      if(scene.tickCount>ani.timeUntil)
-        intensity = 0;
-
-      const uint32_t samplesPerFrame = uint32_t(anim.samplesPerFrame);
-      push.morph[i].indexOffset = uint32_t(anim.index);
-      push.morph[i].sample0     = uint32_t((time/anim.tickPerFrame+0)%anim.numFrames)*samplesPerFrame;
-      push.morph[i].sample1     = uint32_t((time/anim.tickPerFrame+1)%anim.numFrames)*samplesPerFrame;
-      push.morph[i].alpha       = uint16_t(alpha*uint16_t(-1));
-      push.morph[i].intensity   = uint16_t(intensity*uint16_t(-1));
-      }
-    }
+  InstanceDesc d;
+  d.setPosition(v.pos);
+  d.fatness = v.fatness;
+  if(v.skiningAni!=nullptr)
+    d.animPtr = v.skiningAni->offsetId<Matrix4x4>();
+  else if(!objMorphAnim.isEmpty())
+    d.animPtr = objMorphAnim.offsetId<MorphDesc>() + uint32_t(instance*Resources::MAX_MORPH_LAYERS);
+  objInstances.set(&d, instance*sizeof(d), sizeof(d));
   }
 
 void ObjectsBucket::reallocObjPositions() {
-  if(usePositionsSsbo) {
-    windAnim = false;
-    for(size_t i=0; i<CAPACITY; ++i) {
-      auto& vx = val[i];
-      if(vx.isValid && vx.wind!=phoenix::animation_mode::none) {
-        windAnim = true;
-        break;
-        }
+  if(!usePositionsSsbo)
+    return;
+
+  windAnim = false;
+  for(size_t i=0; i<CAPACITY; ++i) {
+    auto& vx = val[i];
+    if(vx.isValid && vx.wind!=phoenix::animation_mode::none) {
+      windAnim = true;
+      break;
       }
+    }
 
-    size_t valLen = 1;
-    for(size_t i=CAPACITY; i>1; --i)
-      if(val[i-1].isValid) {
-        valLen = i;
-        break;
-        }
-
-    auto sz   = nextPot(uint32_t(valLen));
-    auto heap = ssboHeap();
-    if(objPositions.size()!=sz || heap!=objPositions.heap()) {
-      objPositions = owner.getMatrixes(heap, sz);
-      for(size_t i=0; i<valLen; ++i)
-        objPositions.set(val[i].pos,i);
+  owner.realloc(objInstances, valLen*sizeof(InstanceDesc));
+  if(objType==Morph && owner.realloc(objMorphAnim, valLen*sizeof(MorphData))){
+    for(size_t i=0; i<valLen; ++i) {
+      if(!val[i].isValid)
+        continue;
+      updateInstance(i, val[i]);
       }
     }
   }
 
 void ObjectsBucket::invalidateInstancing() {
   instancingType = Normal;
-  if(!useSharedUbo || objType==Pfx) {
+  if(!useSharedUbo || objType==Pfx || objType==Landscape || objType==LandscapeShadow) {
     instancingType = NoInstancing;
     return;
     }
@@ -836,17 +860,13 @@ void ObjectsBucket::invalidateInstancing() {
     auto& ref = *pref;
     if(vx.iboOffset!=ref.iboOffset || vx.iboLength!=ref.iboLength)
       instancingType = NoInstancing;
-    if(vx.fatness!=ref.fatness)
-      instancingType = NoInstancing;
-    if(vx.skiningAni!=ref.skiningAni)
-      instancingType = NoInstancing;
     }
 
   if(instancingType==Normal && pref!=nullptr) {
     if(staticMesh!=nullptr && staticMesh->ibo.size()<=PackedMesh::MaxInd){
       instancingType = Aggressive;
       }
-    if(useMeshlets && animMesh==nullptr) {
+    if(useMeshlets) {
       instancingType = Aggressive;
       }
     }
@@ -919,14 +939,20 @@ void ObjectsBucketDyn::preFrameUpdate(uint8_t fId) {
   if(!hasDynMaterials)
     return;
 
+  bool upd[CAPACITY] = {};
   for(uint8_t ic=0; ic<SceneGlobals::V_Count; ++ic) {
     const auto    c     = SceneGlobals::VisCamera(ic);
     const size_t  indSz = visSet.count(c);
     const size_t* index = visSet.index(c);
-    for(size_t i=0; i<indSz; ++i) {
-      auto& v = val[index[i]];
-      uboSetDynamic(uboObj[index[i]],v,fId);
-      }
+    for(size_t i=0; i<indSz; ++i)
+      upd[index[i]] = true;
+    }
+
+  for(size_t i=0; i<valLen; ++i) {
+    if(!upd[i])
+      continue;
+    auto& v = val[i];
+    uboSetDynamic(uboObj[i],v,fId);
     }
   }
 
@@ -936,7 +962,7 @@ ObjectsBucket::Object& ObjectsBucketDyn::implAlloc(const Bounds& bounds, const M
   const size_t id = size_t(std::distance(val,&obj));
   uboObj   [id].alloc(*this);
   mat      [id] = m;
-  bucketObj[id] = allocBucketDesc(mat[id]);
+  bucketObj[id] = allocBucketDesc(bounds, mat[id]);
 
   uboSetCommon(uboObj[id],mat[id],bucketObj[id]);
   invalidateDyn();
@@ -947,7 +973,7 @@ void ObjectsBucketDyn::implFree(const size_t objId) {
   for(uint8_t i=0; i<Resources::MaxFramesInFlight; ++i)
     for(uint8_t lay=SceneGlobals::V_Shadow0; lay<SceneGlobals::V_Count; ++lay) {
       auto& set = uboObj[objId].ubo[i][lay];
-      owner.recycle(std::move(set));
+      Resources::recycle(std::move(set));
       }
   ObjectsBucket::implFree(objId);
   invalidateDyn();
@@ -984,8 +1010,8 @@ const Material& ObjectsBucketDyn::material(size_t i) const {
   return mat[i];
   }
 
-void ObjectsBucketDyn::setupUbo() {
-  ObjectsBucket::setupUbo();
+void ObjectsBucketDyn::prepareUniforms() {
+  ObjectsBucket::prepareUniforms();
 
   for(size_t i=0; i<CAPACITY; ++i) {
     uboSetCommon(uboObj[i],mat[i],bucketObj[i]);
@@ -1010,29 +1036,12 @@ void ObjectsBucketDyn::invalidateUbo(uint8_t fId) {
     uboSetSkeleton(v,fId);
   }
 
-void ObjectsBucketDyn::fillTlas(std::vector<Tempest::RtInstance>& inst, std::vector<uint32_t>& iboOff, Bindless& out) {
+void ObjectsBucketDyn::fillTlas(RtScene& out) {
   for(size_t i=0; i<CAPACITY; ++i) {
     auto& v = val[i];
     if(!v.isValid || v.blas==nullptr)
       continue;
-
-    if(mat[i].tex!=out.tex.back() ||
-       &staticMesh->vbo!=out.vbo.back() ||
-       &staticMesh->ibo!=out.ibo.back() ||
-       uint32_t(v.iboOffset/3)!=iboOff.back()) {
-      out.tex.push_back(mat[i].tex);
-      out.vbo.push_back(&staticMesh->vbo);
-      out.ibo.push_back(&staticMesh->ibo);
-      iboOff.push_back(uint32_t(v.iboOffset/3));
-      }
-
-    RtInstance ix;
-    ix.mat  = v.pos;
-    ix.id   = uint32_t(out.tex.size()-1);
-    ix.blas = v.blas;
-    if(mat[i].alpha!=Material::Solid)
-      ix.flags = Tempest::RtInstanceFlags::NonOpaque;
-    inst.push_back(ix);
+    out.addInstance(v.pos, *v.blas, mat[i], *staticMesh, v.iboOffset, v.iboLength, toRtCategory(objType));
     }
   }
 
@@ -1055,7 +1064,7 @@ void ObjectsBucketDyn::drawCommon(Tempest::Encoder<Tempest::CommandBuffer>& cmd,
     return;
 
   if(useMeshlets && !textureInShadowPass) {
-    const bool isShadow = (c==SceneGlobals::V_Shadow1 || isHiZPass);
+    const bool isShadow = (c==SceneGlobals::V_Shadow0 || c==SceneGlobals::V_Shadow1 || isHiZPass);
     if(objType==Landscape && isShadow)
       return;
     if(objType==LandscapeShadow && !isShadow)
@@ -1070,8 +1079,8 @@ void ObjectsBucketDyn::drawCommon(Tempest::Encoder<Tempest::CommandBuffer>& cmd,
     switch(objType) {
       case Landscape:
       case LandscapeShadow: {
-        pushBlock.meshletBase        = uint32_t(v.iboOffset/PackedMesh::MaxInd);
-        pushBlock.meshletPerInstance =  int32_t(v.iboLength/PackedMesh::MaxInd);
+        pushBlock.firstMeshlet = uint32_t(v.iboOffset/PackedMesh::MaxInd);
+        pushBlock.meshletCount =  int32_t(v.iboLength/PackedMesh::MaxInd);
         cmd.setUniforms(shader, uboObj[id].ubo[fId][c], &pushBlock, sizeof(uint32_t)*2);
         if(useMeshlets) {
           cmd.dispatchMeshThreads(v.iboLength/PackedMesh::MaxInd);
@@ -1091,22 +1100,16 @@ void ObjectsBucketDyn::drawCommon(Tempest::Encoder<Tempest::CommandBuffer>& cmd,
       case Movable:
       case Morph:
       case Animated:  {
-        uint32_t instance = 0;
-        if(objType!=Animated)
-          instance = objPositions.offsetId()+uint32_t(id); else
-          instance = v.skiningAni->offsetId();
-
-        size_t uboSz = (objType==Morph ? sizeof(UboPush) : sizeof(UboPushBase));
-        updatePushBlock(pushBlock,v,instance,1);
+        uint32_t instance = objInstances.offsetId<InstanceDesc>() + uint32_t(id);
+        updatePushBlock(pushBlock,v,instance,uint32_t(id),1);
         if(useMeshlets) {
-          cmd.setUniforms(shader, uboObj[id].ubo[fId][c], &pushBlock, uboSz);
+          cmd.setUniforms(shader, uboObj[id].ubo[fId][c], &pushBlock, sizeof(UboPush));
           cmd.dispatchMeshThreads(1);
-          // cmd.dispatchMesh(uint32_t(v.iboLength/PackedMesh::MaxInd), 1);
           } else {
-          cmd.setUniforms(shader, uboObj[id].ubo[fId][c], &pushBlock, uboSz);
+          cmd.setUniforms(shader, uboObj[id].ubo[fId][c], &pushBlock, sizeof(UboPush));
           if(objType!=Animated)
-            cmd.draw(staticMesh->vbo, staticMesh->ibo, v.iboOffset, v.iboLength, instance, 1); else
-            cmd.draw(animMesh  ->vbo, animMesh  ->ibo, v.iboOffset, v.iboLength, instance, 1);
+            cmd.draw(staticMesh->vbo, staticMesh->ibo, v.iboOffset, v.iboLength, 0, 1); else
+            cmd.draw(animMesh  ->vbo, animMesh  ->ibo, v.iboOffset, v.iboLength, 0, 1);
           }
         break;
         }
@@ -1119,14 +1122,14 @@ void ObjectsBucketDyn::drawHiZ(Tempest::Encoder<Tempest::CommandBuffer>& cmd, ui
     return;
 
   cmd.setUniforms(*pHiZ, uboHiZ.ubo[fId][SceneGlobals::V_Shadow1]);
-  for(size_t i=0; i<valSz; ++i) {
+  for(size_t i=0; i<valLen; ++i) {
     auto& v = val[i];
     if(!v.isValid)
       continue;
 
     UboPush pushBlock = {};
-    pushBlock.meshletBase        = uint32_t(v.iboOffset/PackedMesh::MaxInd);
-    pushBlock.meshletPerInstance =  int32_t(v.iboLength/PackedMesh::MaxInd);
+    pushBlock.firstMeshlet = uint32_t(v.iboOffset/PackedMesh::MaxInd);
+    pushBlock.meshletCount =  int32_t(v.iboLength/PackedMesh::MaxInd);
     cmd.setUniforms(*pHiZ, &pushBlock, sizeof(uint32_t)*2);
 
     cmd.dispatchMeshThreads(v.iboLength/PackedMesh::MaxInd);

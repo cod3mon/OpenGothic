@@ -14,6 +14,7 @@
 #include "ui/documentmenu.h"
 #include "ui/chapterscreen.h"
 #include "utils/versioninfo.h"
+#include "sound/soundfx.h"
 
 class VersionInfo;
 class CameraDefinitions;
@@ -21,6 +22,7 @@ class SoundDefinitions;
 class VisualFxDefinitions;
 class ParticlesDefinitions;
 class MusicDefinitions;
+class FightAi;
 class IniFile;
 
 class Gothic final {
@@ -39,13 +41,31 @@ class Gothic final {
       FailedSave = 5
       };
 
+    struct Options {
+      bool  doRayQuery          = false;
+      bool  doRtGi              = false;
+      bool  doMeshShading       = false;
+
+      bool  hideFocus           = false;
+      float cameraFov           = 67.5f;
+      float interfaceScale      = 1;
+      int   inventoryCellSize   = 70;
+
+      bool    showHealthBar     = true;
+      uint8_t showManaBar       = 2;
+      uint8_t showSwimBar       = 1;
+      };
+
     auto         version() const -> const VersionInfo&;
 
     bool         isInGame() const;
+    bool         isInGameAndAlive() const;
 
-    std::string_view defaultWorld()  const;
-    std::string_view defaultPlayer() const;
-    std::string_view defaultSave()   const;
+    std::string_view defaultWorld()       const;
+    std::string_view defaultPlayer()      const;
+    std::string_view defaultSave()        const;
+    std::string_view defaultGameDatFile() const;
+    std::string_view defaultOutputUnits() const;
 
     void         setGame(std::unique_ptr<GameSession> &&w);
     auto         clearGame() -> std::unique_ptr<GameSession>;
@@ -85,18 +105,21 @@ class Gothic final {
     bool         isMarvinEnabled() const;
     void         setMarvinEnabled(bool m);
 
+    static auto  options() -> const Options&;
+
     bool         isGodMode() const { return godMode; }
     void         setGodMode(bool g) { godMode = g; }
 
-    bool         doHideFocus () const { return hideFocus; }
+    void         toggleDesktop() { desktop = !desktop; }
+    bool         isDesktop() { return desktop; }
+
     bool         doFrate() const { return showFpsCounter; }
     void         setFRate(bool f) { showFpsCounter = f; }
 
     bool         doClock() const { return showTime; }
     void         setClock(bool t) { showTime = t; }
 
-    bool         doRayQuery() const;
-    bool         doMeshShading() const;
+    Tempest::Signal<void()> toggleGi;
 
     LoadState    checkLoading() const;
     bool         finishLoading();
@@ -140,10 +163,9 @@ class Gothic final {
     std::string_view                      messageByName (std::string_view id) const;
     uint32_t                              messageTime   (std::string_view id) const;
 
-    std::u16string                        nestedPath(const std::initializer_list<const char16_t*> &name, Tempest::Dir::FileType type) const;
-    std::unique_ptr<phoenix::vm>          createPhoenixVm(std::string_view datFile);
-    std::vector<uint8_t>                  loadScriptCode(std::string_view datFile);
-    phoenix::script                       loadPhoenixScriptCode(std::string_view datFile);
+    static std::u16string                 nestedPath(const std::initializer_list<const char16_t*> &name, Tempest::Dir::FileType type);
+    std::unique_ptr<phoenix::vm>          createPhoenixVm(std::string_view datFile, const ScriptLang lang = ScriptLang::NONE);
+    phoenix::script                       loadScript(std::string_view datFile, const ScriptLang lang);
     void                                  setupVmCommonApi(phoenix::vm &vm);
 
     static const FightAi&                 fai();
@@ -162,15 +184,16 @@ class Gothic final {
 
   private:
     VersionInfo                             vinfo;
+    Options                                 opts;
     std::mt19937                            randGen;
     uint16_t                                pauseSum=0;
     bool                                    isMarvin       = false;
     bool                                    godMode        = false;
+    bool                                    desktop        = false;
     bool                                    showFpsCounter = false;
     bool                                    showTime       = false;
-    bool                                    hideFocus      = false;
-    bool                                    isMeshSh       = false;
-    std::string                             wrldDef, plDef;
+
+    std::string                             wrldDef, plDef, gameDatDef, ouDef;
 
     std::unique_ptr<IniFile>                defaults;
     std::unique_ptr<IniFile>                baseIniFile;

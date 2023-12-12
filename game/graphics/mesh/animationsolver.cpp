@@ -121,15 +121,14 @@ const Animation::Sequence* AnimationSolver::implSolveAnim(AnimationSolver::Anim 
       return solveFrm("T_FISTPARADE_0");
     }
   else if(st==WeaponState::W1H || st==WeaponState::W2H) {
-    if(a==Anim::Attack && (pose.isInAnim("S_1HWALKL") || pose.isInAnim("S_1HRUNL") ||
-                          pose.isInAnim("S_2HWALKL") || pose.isInAnim("S_2HRUNL")))
+    if(a==Anim::Attack && pose.hasState(BS_RUN))
       return solveFrm("T_%sATTACKMOVE",st);
     if(a==Anim::AttackL)
       return solveFrm("T_%sATTACKL",st);
     if(a==Anim::AttackR)
       return solveFrm("T_%sATTACKR",st);
     if(a==Anim::Attack || a==Anim::AttackL || a==Anim::AttackR)
-      return solveFrm("S_%sATTACK",st); // TODO: proper attack  window
+      return solveFrm("S_%sATTACK",st);
     if(a==Anim::AttackBlock) {
       const Animation::Sequence* s=nullptr;
       switch(std::rand()%3){
@@ -240,7 +239,7 @@ const Animation::Sequence* AnimationSolver::implSolveAnim(AnimationSolver::Anim 
       s = solveFrm("T_%sPARADEJUMPB",st);
     if(s!=nullptr)
       return s;
-    // This is bases on original game: if no move-back animation, even in water, game defaults to standart walk-bak
+    // This is bases on original game: if no move-back animation, even in water, game defaults to standard walk-back
     return solveFrm("T_%sJUMPB",st);
     }
   // Rotation

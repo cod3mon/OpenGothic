@@ -1,4 +1,3 @@
-#include "damagecalculator.h"
 #include "inventory.h"
 
 #include <Tempest/Log>
@@ -20,9 +19,9 @@ const Item* Inventory::Iterator::operator ->() const {
   return owner->items[at].get();
   }
 
-bool Inventory::Iterator::isEquiped() const {
+bool Inventory::Iterator::isEquipped() const {
   auto& cur = *owner->items[at];
-  return subId==0 && cur.isEquiped();
+  return subId==0 && cur.isEquipped();
   }
 
 uint8_t Inventory::Iterator::slot() const {
@@ -33,9 +32,9 @@ uint8_t Inventory::Iterator::slot() const {
 size_t Inventory::Iterator::count() const {
   auto& cur = *owner->items[at];
   if(!cur.isMulti()) {
-    if(cur.isEquiped() && subId==0)
+    if(cur.isEquipped() && subId==0)
       return cur.equipCount();
-    if(cur.isEquiped())
+    if(cur.isEquipped())
       return cur.count()-cur.equipCount();
     return cur.count();
     }
@@ -46,7 +45,7 @@ Inventory::Iterator& Inventory::Iterator::operator++() {
   auto& it  = owner->items;
   auto& cur = *it[at];
   if(!cur.isMulti()) {
-    if(cur.isEquiped() && cur.count()>1 && subId==0) {
+    if(cur.isEquipped() && cur.count()>1 && subId==0) {
       ++subId;
       return *this;
       }
@@ -70,18 +69,18 @@ Inventory::Iterator::Iterator(Inventory::IteratorType t, const Inventory* owner)
 void Inventory::Iterator::skipHidden() {
   auto& it = owner->items;
   if(type==T_Trade) {
-    while(at<it.size() && (it[at]->isEquiped() || it[at]->isGold()))
+    while(at<it.size() && (it[at]->isEquipped() || it[at]->isGold()))
       ++at;
     }
   if(type==T_Ransack) {
-    while(at<it.size() && it[at]->isEquiped()) {
+    while(at<it.size() && it[at]->isEquipped()) {
       ++at;
       }
     }
   }
 
 
-Inventory::Inventory() {  
+Inventory::Inventory() {
   }
 
 Inventory::~Inventory() {
@@ -122,15 +121,17 @@ void Inventory::implLoad(Npc* owner, World& world, Serialize &s) {
   amulet = readPtr(s);
   ringL  = readPtr(s);
   ringR  = readPtr(s);
-  mele   = readPtr(s);
+  melee  = readPtr(s);
   range  = readPtr(s);
+  if(s.version()>45)
+    shield = readPtr(s);
   for(auto& i:numslot)
     i = readPtr(s);
 
   uint8_t id=255;
   s.read(id);
   if(id==1)
-    active=&mele;
+    active=&melee;
   else if(id==2)
     active=&range;
   else if(3<=id && id<10)
@@ -168,13 +169,14 @@ void Inventory::save(Serialize &fout) const {
   fout.write(indexOf(amulet));
   fout.write(indexOf(ringL) );
   fout.write(indexOf(ringR) );
-  fout.write(indexOf(mele)  );
+  fout.write(indexOf(melee) );
   fout.write(indexOf(range) );
+  fout.write(indexOf(shield));
   for(auto& i:numslot)
     fout.write(indexOf(i));
 
   uint8_t id=255;
-  if(active==&mele)
+  if(active==&melee)
     id=1;
   else if(active==&range)
     id=2;
@@ -306,7 +308,7 @@ void Inventory::delItem(Item *it, size_t count, Npc& owner) {
       }
   }
 
-void Inventory::trasfer(Inventory &to, Inventory &from, Npc* fromNpc, size_t itemSymbol, size_t count, World &wrld) {
+void Inventory::transfer(Inventory &to, Inventory &from, Npc* fromNpc, size_t itemSymbol, size_t count, World &wrld) {
   for(size_t i=0;i<from.items.size();++i){
     auto& it = *from.items[i];
     if(it.clsId()!=itemSymbol)
@@ -319,7 +321,7 @@ void Inventory::trasfer(Inventory &to, Inventory &from, Npc* fromNpc, size_t ite
       count=it.count();
 
     if(it.count()==count) {
-      if(it.isEquiped()){
+      if(it.isEquipped()) {
         if(fromNpc==nullptr){
           Log::e("Inventory: invalid transfer call");
           return; // error
@@ -341,7 +343,7 @@ Item *Inventory::getItem(size_t instance) {
 
 bool Inventory::unequip(size_t cls, Npc &owner) {
   Item* it=findByClass(cls);
-  if(it==nullptr || !it->isEquiped())
+  if(it==nullptr || !it->isEquipped())
     return false;
   unequip(it,owner);
   return true;
@@ -368,19 +370,23 @@ void Inventory::unequip(Item *it, Npc &owner) {
     setSlot(ringR,nullptr,owner,false);
     return;
     }
-  if(mele==it) {
-    setSlot(mele,nullptr,owner,false);
+  if(melee==it) {
+    setSlot(melee,nullptr,owner,false);
     return;
     }
   if(range==it) {
     setSlot(range,nullptr,owner,false);
     return;
     }
+  if(shield==it) {
+    setSlot(shield,nullptr,owner,false);
+    return;
+    }
 
   for(auto& i:numslot)
     if(i==it)
       setSlot(i,nullptr,owner,false);
-  if(it->isEquiped()) {
+  if(it->isEquipped()) {
     // error
     Log::e("[",owner.displayName().data(),"] inconsistent inventory state");
     setSlot(it,nullptr,owner,false);
@@ -404,22 +410,27 @@ bool Inventory::setSlot(Item *&slot, Item* next, Npc& owner, bool force) {
     }
 
   if(slot!=nullptr) {
-    auto& itData = slot->handle();
-    auto  flag   = ItmFlags(itData.main_flag);
+    auto& itData   = slot->handle();
+    auto  mainFlag = ItmFlags(itData.main_flag);
+    auto  flag     = ItmFlags(itData.flags);
+
     applyArmour(*slot,owner,-1);
-    if(slot->isEquiped())
-      slot->setAsEquiped(false);
+    if(slot->isEquipped())
+      slot->setAsEquipped(false);
     if(&slot==active)
       applyWeaponStats(owner,*slot,-1);
     slot=nullptr;
 
-    if(flag & ITM_CAT_ARMOR){
+    if(flag & ITM_SHIELD){
+      owner.setShield(MeshObjects::Mesh());
+      }
+    else if(mainFlag & ITM_CAT_ARMOR){
       owner.updateArmour();
       }
-    else if(flag & ITM_CAT_NF){
+    else if(mainFlag & ITM_CAT_NF){
       owner.setSword(MeshObjects::Mesh());
       }
-    else if(flag & ITM_CAT_FF){
+    else if(mainFlag & ITM_CAT_FF){
       owner.setRangeWeapon(MeshObjects::Mesh());
       }
     vm.invokeItem(&owner,uint32_t(itData.on_unequip));
@@ -430,13 +441,14 @@ bool Inventory::setSlot(Item *&slot, Item* next, Npc& owner, bool force) {
 
   auto& itData = next->handle();
   slot=next;
-  slot->setAsEquiped(true);
+  slot->setAsEquipped(true);
   slot->setSlot(slotId(slot));
   applyArmour(*slot,owner,1);
 
   updateArmourView(owner);
   updateSwordView (owner);
   updateBowView   (owner);
+  updateShieldView(owner);
   if(&slot==active) {
     updateRuneView  (owner);
     applyWeaponStats(owner,*slot,1);
@@ -451,6 +463,7 @@ void Inventory::updateView(Npc& owner) {
   updateArmourView(owner);
   updateSwordView (owner);
   updateBowView   (owner);
+  updateShieldView(owner);
   updateRuneView  (owner);
 
   for(auto& i:mdlSlots) {
@@ -478,17 +491,17 @@ void Inventory::updateArmourView(Npc& owner) {
   }
 
 void Inventory::updateSwordView(Npc &owner) {
-  if(mele==nullptr) {
+  if(melee==nullptr) {
     owner.setSword(MeshObjects::Mesh());
     return;
     }
 
-  auto  vbody  = owner.world().addView(mele->handle());
+  auto  vbody  = owner.world().addView(melee->handle());
   owner.setSword(std::move(vbody));
   }
 
 void Inventory::updateBowView(Npc &owner) {
-  if(range==nullptr){
+  if(range==nullptr) {
     owner.setRangeWeapon(MeshObjects::Mesh());
     return;
     }
@@ -497,6 +510,19 @@ void Inventory::updateBowView(Npc &owner) {
   if(flag & ITM_CAT_FF){
     auto  vbody  = owner.world().addView(range->handle());
     owner.setRangeWeapon(std::move(vbody));
+    }
+  }
+
+void Inventory::updateShieldView(Npc& owner) {
+  if(shield==nullptr) {
+    owner.setShield(MeshObjects::Mesh());
+    return;
+    }
+
+  auto flag = ItmFlags(shield->itemFlag());
+  if(flag & ITM_SHIELD){
+    auto  vbody  = owner.world().addView(shield->handle());
+    owner.setShield(std::move(vbody));
     }
   }
 
@@ -512,9 +538,9 @@ void Inventory::updateRuneView(Npc &owner) {
   owner.setMagicWeapon(Effect(*vfx,owner.world(),owner,SpellFxKey::Init));
   }
 
-void Inventory::equipBestMeleWeapon(Npc &owner) {
+void Inventory::equipBestMeleeWeapon(Npc &owner) {
   auto a = bestMeleeWeapon(owner);
-  setSlot(mele,a,owner,false);
+  setSlot(melee,a,owner,false);
   }
 
 void Inventory::equipBestRangeWeapon(Npc &owner) {
@@ -523,7 +549,7 @@ void Inventory::equipBestRangeWeapon(Npc &owner) {
   }
 
 void Inventory::unequipWeapons(GameScript &, Npc &owner) {
-  setSlot(mele, nullptr,owner,false);
+  setSlot(melee,nullptr,owner,false);
   setSlot(range,nullptr,owner,false);
   }
 
@@ -534,7 +560,7 @@ void Inventory::unequipArmour(GameScript &, Npc &owner) {
 void Inventory::clear(GameScript&, Npc&, bool includeMissionItm) {
   std::vector<std::unique_ptr<Item>> used;
   for(auto& i:items)
-    if(i->isEquiped() || (i->isMission() && !includeMissionItm)){
+    if(i->isEquipped() || (i->isMission() && !includeMissionItm)){
       used.emplace_back(std::move(i));
       }
   items = std::move(used); // Gothic don't clear items, which are in use
@@ -547,6 +573,13 @@ void Inventory::clear(GameScript& vm, Interactive& owner, bool includeMissionItm
       used.emplace_back(std::move(i));
       }
   items = std::move(used); // Gothic don't clear items, which are in use
+  }
+
+bool Inventory::hasSpell(int32_t splId) const {
+  for(auto& i:items)
+    if(i->spellId()==splId)
+      return true;
+  return false;
   }
 
 bool Inventory::hasMissionItems() const {
@@ -562,6 +595,20 @@ const Item *Inventory::activeWeapon() const {
   return nullptr;
   }
 
+bool Inventory::hasRangedWeaponWithAmmo() const {
+  uint32_t munition = 0;
+  for(auto& i:items) {
+    uint32_t cls = uint32_t(i->handle().munition);
+    if(cls>0 && cls!=munition) {
+      for(auto& it:items)
+        if(it->clsId()==cls)
+          return true;
+      munition = cls;
+      }
+    }
+  return false;
+  }
+
 Item *Inventory::activeWeapon() {
   if(active!=nullptr)
     return *active;
@@ -569,9 +616,9 @@ Item *Inventory::activeWeapon() {
   }
 
 void Inventory::switchActiveWeaponFist() {
-  if(active==&mele)
+  if(active==&melee)
     active=nullptr; else
-    active=&mele;
+    active=&melee;
   }
 
 void Inventory::switchActiveWeapon(Npc& owner,uint8_t slot) {
@@ -584,11 +631,13 @@ void Inventory::switchActiveWeapon(Npc& owner,uint8_t slot) {
 
   Item** next=nullptr;
   if(slot==1)
-    next=&mele;
+    next=&melee;
   if(slot==2)
     next=&range;
   if(3<=slot && slot<=10)
     next=&numslot[slot-3];
+  if(next==active)
+    return;
   if(next!=nullptr && *next!=nullptr)
     active=next;
 
@@ -613,14 +662,6 @@ void Inventory::switchActiveSpell(int32_t spell, Npc& owner) {
       updateRuneView(owner);
       return;
       }
-  }
-
-Item* Inventory::spellById(int32_t splId) {
-  for(auto& i:items)
-    if(i->spellId()==splId){
-      return i.get();
-      }
-  return nullptr;
   }
 
 uint8_t Inventory::currentSpellSlot() const {
@@ -775,16 +816,19 @@ bool Inventory::use(size_t cls, Npc &owner, uint8_t slotHint, bool force) {
   auto  mainflag = ItmFlags(itData.main_flag);
   auto  flag     = ItmFlags(itData.flags);
 
+  if(flag & ITM_SHIELD)
+    return setSlot(shield,it,owner,force);
+
   if(mainflag & ITM_CAT_NF)
-    return setSlot(mele,it,owner,force);
+    return setSlot(melee,it,owner,force);
 
   if(mainflag & ITM_CAT_FF)
     return setSlot(range,it,owner,force);
 
   if(mainflag & ITM_CAT_RUNE) {
-    if(it->isEquiped() && slotHint==it->slot())
+    if(it->isEquipped() && slotHint==it->slot())
       return false;
-    if(it->isEquiped())
+    if(it->isEquipped())
       unequip(it,owner);
     return equipNumSlot(it,slotHint,owner,force);
     }
@@ -835,7 +879,7 @@ bool Inventory::use(size_t cls, Npc &owner, uint8_t slotHint, bool force) {
 
 bool Inventory::equip(size_t cls, Npc &owner, bool force) {
   Item* it=findByClass(cls);
-  if(it==nullptr || it->isEquiped())
+  if(it==nullptr || it->isEquipped())
     return false;
   return use(cls,owner,Item::NSLOT,force);
   }
@@ -848,8 +892,9 @@ void Inventory::invalidateCond(Npc &owner) {
   invalidateCond(amulet,owner);
   invalidateCond(ringL ,owner);
   invalidateCond(ringR ,owner);
-  invalidateCond(mele  ,owner);
+  invalidateCond(melee ,owner);
   invalidateCond(range ,owner);
+  invalidateCond(shield,owner);
   for(auto& i:numslot)
     invalidateCond(i,owner);
   }
@@ -867,7 +912,7 @@ void Inventory::autoEquip(Npc &owner) {
   auto m = bestMeleeWeapon(owner);
   auto r = bestRangeWeapon(owner);
   setSlot(armour,a,owner,false);
-  setSlot(mele  ,m,owner,false);
+  setSlot(melee ,m,owner,false);
   setSlot(range ,r,owner,false);
   }
 
@@ -878,7 +923,7 @@ void Inventory::equipArmour(int32_t cls, Npc &owner) {
   if(it==nullptr)
     return;
   if(uint32_t(it->mainFlag()) & ITM_CAT_ARMOR){
-    if(!it->isEquiped())
+    if(!it->isEquipped())
       use(size_t(cls),owner,Item::NSLOT,true);
     }
   }
@@ -979,7 +1024,7 @@ int Inventory::orderId(const Item& i) {
   }
 
 uint8_t Inventory::slotId(Item *&slt) const {
-  if(&slt==&mele)
+  if(&slt==&melee)
     return 1;
   if(&slt==&range)
     return 2;

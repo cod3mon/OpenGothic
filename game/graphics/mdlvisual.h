@@ -49,6 +49,7 @@ class MdlVisual final {
     void                           setBody       (Npc& npc, MeshObjects::Mesh&& body, const int32_t version);
     void                           setSword      (MeshObjects::Mesh&& sword);
     void                           setRangeWeapon(MeshObjects::Mesh&& bow);
+    void                           setShield     (MeshObjects::Mesh&& shield);
     void                           setAmmoItem   (MeshObjects::Mesh&& ammo, std::string_view bone);
     void                           setSlotItem   (MeshObjects::Mesh&& itm,  std::string_view bone);
     void                           setStateItem  (MeshObjects::Mesh&& itm,  std::string_view bone);
@@ -89,7 +90,7 @@ class MdlVisual final {
 
     bool                           startAnim      (Npc& npc, WeaponState st);
     const Animation::Sequence*     startAnimItem  (Npc& npc, std::string_view scheme, int state);
-    bool                           startAnimSpell (Npc& npc, std::string_view scheme, bool invest);
+    const Animation::Sequence*     startAnimSpell (Npc& npc, std::string_view scheme, bool invest);
     bool                           startAnimDialog(Npc& npc);
     void                           startMMAnim    (Npc& npc, std::string_view anim, std::string_view node);
     void                           startFaceAnim  (Npc& npc, std::string_view anim, float intensity, uint64_t duration);
@@ -106,7 +107,7 @@ class MdlVisual final {
     const Tempest::Matrix4x4&      transform() const { return pos; }
     float                          viewDirection() const;
 
-    const Animation::Sequence*     continueCombo(Npc& npc, AnimationSolver::Anim a, WeaponState st, WalkBit wlk);
+    const Animation::Sequence*     continueCombo(Npc& npc, AnimationSolver::Anim a, BodyState bs, WeaponState st, WalkBit wlk);
     uint16_t                       comboLength() const;
 
     Bounds                         bounds() const;
@@ -151,7 +152,7 @@ class MdlVisual final {
     Tempest::Matrix4x4             pos;
     MeshObjects::Mesh              view;
 
-    MeshAttach                     head, sword, bow;
+    MeshAttach                     head, sword, bow, shield;
     MeshAttach                     ammunition, stateItm;
     std::vector<MeshAttach>        item;
     std::vector<MeshAttach>        attach;

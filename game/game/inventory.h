@@ -2,6 +2,8 @@
 
 #include <vector>
 #include <memory>
+#include <string_view>
+#include <string>
 
 #include "game/constants.h"
 
@@ -37,7 +39,7 @@ class Inventory final {
         const Item* operator -> () const;
 
         size_t      count() const;
-        bool        isEquiped() const;
+        bool        isEquipped() const;
         uint8_t     slot() const;
 
         Iterator&   operator++();
@@ -62,7 +64,7 @@ class Inventory final {
     size_t       goldCount() const;
     size_t       itemCount(const size_t id) const;
 
-    static void  trasfer(Inventory& to, Inventory& from, Npc *fromNpc, size_t cls, size_t count, World &wrld);
+    static void  transfer(Inventory& to, Inventory& from, Npc *fromNpc, size_t cls, size_t count, World &wrld);
 
     Item*  getItem(size_t instance);
     Item*  addItem(std::unique_ptr<Item>&& p);
@@ -78,17 +80,20 @@ class Inventory final {
     void   autoEquip(Npc &owner);
     void   equipArmour         (int32_t cls, Npc &owner);
     void   equipBestArmour     (Npc &owner);
-    void   equipBestMeleWeapon (Npc &owner);
+    void   equipBestMeleeWeapon(Npc &owner);
     void   equipBestRangeWeapon(Npc &owner);
     void   unequipWeapons(GameScript &vm, Npc &owner);
     void   unequipArmour(GameScript &vm, Npc &owner);
     void   clear(GameScript &vm, Npc &owner, bool includeMissionItm = false);
     void   clear(GameScript &vm, Interactive &owner, bool includeMissionItm = false);
+    bool   hasSpell(int32_t spl) const;
     bool   hasMissionItems() const;
+    bool   hasRangedWeaponWithAmmo() const;
 
     void   updateArmourView(Npc& owner);
     void   updateSwordView (Npc& owner);
     void   updateBowView   (Npc& owner);
+    void   updateShieldView(Npc& owner);
     void   updateRuneView  (Npc& owner);
     void   updateView      (Npc& owner);
 
@@ -97,10 +102,9 @@ class Inventory final {
     void   switchActiveWeaponFist();
     void   switchActiveWeapon(Npc &owner, uint8_t slot);
     void   switchActiveSpell (int32_t spell, Npc &owner);
-    Item*  spellById(int32_t splId);
 
     Item*  currentArmour()         { return armour;     }
-    Item*  currentMeleWeapon()     { return mele;       }
+    Item*  currentMeleeWeapon()    { return melee;      }
     Item*  currentRangeWeapon()    { return range;      }
     Item*  currentSpell(uint8_t s) { return numslot[s]; }
     const Item*  currentSpell(uint8_t s) const { return numslot[s]; }
@@ -152,16 +156,17 @@ class Inventory final {
     uint32_t                           indexOf(const Item* it) const;
     Item*                              readPtr(Serialize& fin);
 
-    Item*                              armour=nullptr;
-    Item*                              belt  =nullptr;
-    Item*                              amulet=nullptr;
-    Item*                              ringL =nullptr;
-    Item*                              ringR =nullptr;
+    Item*                              armour     = nullptr;
+    Item*                              belt       = nullptr;
+    Item*                              amulet     = nullptr;
+    Item*                              ringL      = nullptr;
+    Item*                              ringR      = nullptr;
 
-    Item**                             active=nullptr;
-    Item*                              mele  =nullptr;
-    Item*                              range =nullptr;
-    Item*                              numslot[8]={};
+    Item**                             active     = nullptr;
+    Item*                              melee      = nullptr;
+    Item*                              range      = nullptr;
+    Item*                              shield     = nullptr;
+    Item*                              numslot[8] = {};
     std::vector<MdlSlot>               mdlSlots;
     MdlSlot                            ammotSlot, stateSlot;
     int32_t                            curItem=0;

@@ -17,10 +17,13 @@ using namespace Tempest;
 
 // https://www.slideshare.net/LukasLang/physically-based-lighting-in-unreal-engine-4
 // https://www.slideshare.net/DICEStudio/moving-frostbite-to-physically-based-rendering
-static const float DirectSunLux  = 64'000.f;
+// static const float DirectSunLux  = 64'000.f; // 85'000.f;
+static const float DirectSunLux  = 143'000.f;
 static const float DirectMoonLux = 0.27f;
-static const float StreetLight   = 10.f;
 static const float NightLight    = 0.36f;
+
+// static const float ShadowSunLux  =  10'000.f;
+// static const float StreetLight   = 10.f;
 
 static float smoothstep(float edge0, float edge1, float x) {
   float t = std::min(std::max((x - edge0) / (edge1 - edge0), 0.f), 1.f);
@@ -63,12 +66,25 @@ Sky::Sky(const SceneGlobals& scene, const World& world, const std::pair<Tempest:
   moonSize     = Gothic::settingsGetF("SKY_OUTDOOR","zMoonSize");
   if(moonSize<=1)
     moonSize = 400;
+    
+  if(sunImg==nullptr)
+    sunImg = &Resources::fallbackBlack();
+  if(moonImg==nullptr)
+    moonImg = &Resources::fallbackBlack();
 
   auto& device = Resources::device();
+
+  // crappy rasbery-pi like hardware
+  if(!device.properties().hasStorageFormat(lutRGBAFormat))
+    lutRGBAFormat = Tempest::TextureFormat::RGBA8;
+  if(!device.properties().hasStorageFormat(lutRGBFormat))
+    lutRGBFormat = Tempest::TextureFormat::RGBA8;
+
   cloudsLut    = device.image2d   (lutRGBAFormat,  2,  1);
   transLut     = device.attachment(lutRGBFormat, 256, 64);
   multiScatLut = device.attachment(lutRGBFormat,  32, 32);
   viewLut      = device.attachment(Tempest::TextureFormat::RGBA32F, 128, 64);
+  viewCldLut   = device.attachment(Tempest::TextureFormat::RGBA32F, 512, 256);
   Gothic::inst().onSettingsChanged.bind(this,&Sky::setupSettings);
   setupSettings();
   }
@@ -117,7 +133,7 @@ void Sky::setupSettings() {
       break;
     }
   //fogLut3D = device.image3d(lutRGBAFormat,1,1,1);
-  setupUbo();
+  prepareUniforms();
   }
 
 void Sky::drawSunMoon(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint32_t frameId, bool sun) {
@@ -199,6 +215,15 @@ void Sky::updateLight(const int64_t now) {
     pulse = -1.f + (float(now)/float(rise));
     }
 
+  /**
+   * central EU, mid day, sun at 60deg:
+   * sun = 70'000 lux
+   * sky = 20'000 lux
+   * all = 90'000 lux
+   * expected DirectSunLux = all/(cos(60)*sunClr) = 185'000
+   * */
+  //pulse = 0.5;
+
   {
     float k   = float(now)/float(midnight);
     float ax  = 360-360*std::fmod(k+0.25f,1.f);
@@ -209,17 +234,21 @@ void Sky::updateLight(const int64_t now) {
   static float sunMul = 1;
   static float ambMul = 1;
   // static auto  groundAlbedo = Vec3(0.34f, 0.42f, 0.26f); // Foliage(MacBeth)
-  static auto  groundAlbedo = Vec3(0.39f, 0.40f, 0.33f);
+  static auto  groundAlbedo = Vec3(0.47f); // Neutral5 (MacBeth)
+  // static auto  groundAlbedo = Vec3(0.39f, 0.40f, 0.33f);
   static float lumScale = 5.f / DirectSunLux;
 
-
   const float dirY = sun.dir().y;
-  float dayTint = std::max(dirY+0.2f, 0.f);
-  dayTint = 1.f - std::pow(1.f - dayTint,3.f);
-  dayTint *= 0.6f;
+  // float dayTint = std::max(dirY+0.2f, 0.f);
+  // dayTint = 1.f - std::pow(1.f - dayTint,3.f);
+  // dayTint *= 0.1f;
+  float dayTint = std::max(dirY+0.01f, 0.f);
 
-  const auto ambientNight = groundAlbedo*NightLight;
-  const auto ambientDay   = groundAlbedo*GSunIntensity*dayTint + ambientNight;
+  //const auto ambientNight = groundAlbedo*NightLight*0;
+  //const auto ambientDay   = groundAlbedo*ShadowSunLux*dayTint;
+
+  const auto ambientNight = groundAlbedo*NightLight*0.25;
+  const auto ambientDay   = groundAlbedo*DirectSunLux*dayTint * 0.2f*0.25;
 
   const auto directDay    = Vec3(0.94f, 0.87f, 0.76f); //TODO: use tLUT to guide sky color in shader
   const auto directNight  = Vec3(0.27f, 0.05f, 0.01f);
@@ -229,7 +258,8 @@ void Sky::updateLight(const int64_t now) {
   aAmbient = std::pow(aAmbient,3.f);
 
   auto clr = directNight *(1.f-aDirect ) + directDay *aDirect;
-  ambient  = ambientNight*(1.f-aAmbient) + ambientDay*aAmbient;
+  ambient  = ambientNight + ambientDay;
+  // ambient  = ambientNight*(1.f-aAmbient) + ambientDay*aAmbient;
 
   const float sunOcclude = smoothstep(0.0f, 0.01f, sun.dir().y);
   clr = clr*sunOcclude;
@@ -245,10 +275,10 @@ void Sky::updateLight(const int64_t now) {
   float lsky = smoothstep(0.f, 0.2f, std::max(dirY, 0.1f));
   lsky *= std::pow(linearstep(-0.205f, 0.02f, dirY), exp); // day-night tint
 
-  //const float fAmbient = Vec3::dotProduct(ambient, Vec3(0.2125f, 0.7154f, 0.0721f));
-  //float lx = lsky*GSunIntensity*1.1f + fAmbient*0.5f + DirectMoonLux + NightLight;
+  const float fAmbient = Vec3::dotProduct(ambient, Vec3(0.2125f, 0.7154f, 0.0721f));
+  float lx = lsky*GSunIntensity*1.1f + fAmbient*0.9f + DirectMoonLux + NightLight;
 
-  float lx = lsky*GSunIntensity*1.1f + StreetLight*0.25f + NightLight;
+  //float lx = lsky*GSunIntensity*1.5f + StreetLight*0.15f + NightLight;
   exposureInv = lx/GSunIntensity;
   }
 
@@ -258,9 +288,13 @@ void Sky::updateLight(const int64_t now) {
 
   exposureInv = exposureInv/lumScale;
   exposure = 1.f/exposureInv;
+
+  static float mulExposure = -1;
+  if(mulExposure>0)
+    exposure *= mulExposure;
   }
 
-void Sky::setupUbo() {
+void Sky::prepareUniforms() {
   auto& device = Resources::device();
   auto  smp    = Sampler::trillinear();
   auto  smpB   = Sampler::bilinear();
@@ -298,10 +332,13 @@ void Sky::setupUbo() {
   uboSkyViewLut.set(1, multiScatLut, smpB);
   uboSkyViewLut.set(2, cloudsLut,    smpB);
 
-  uboFogViewLut = device.descriptors(Shaders::inst().fogViewLut);
-  uboFogViewLut.set(0, transLut,       smpB);
-  uboFogViewLut.set(1, multiScatLut,   smpB);
-  uboFogViewLut.set(2, cloudsLut,      smpB);
+  uboSkyViewCldLut = device.descriptors(Shaders::inst().skyViewCldLut);
+  uboSkyViewCldLut.set(0, scene.uboGlobal[SceneGlobals::V_Main]);
+  uboSkyViewCldLut.set(1, viewLut);
+  uboSkyViewCldLut.set(2,*cloudsDay()  .lay[0],smp);
+  uboSkyViewCldLut.set(3,*cloudsDay()  .lay[1],smp);
+  uboSkyViewCldLut.set(4,*cloudsNight().lay[0],smp);
+  uboSkyViewCldLut.set(5,*cloudsNight().lay[1],smp);
 
   uboSky = device.descriptors(Shaders::inst().sky);
   uboSky.set(0, transLut,       smpB);
@@ -406,6 +443,10 @@ void Sky::prepareSky(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint32_t fra
   cmd.setFramebuffer({{viewLut, Tempest::Discard, Tempest::Preserve}});
   cmd.setUniforms(Shaders::inst().skyViewLut, uboSkyViewLut, &ubo, sizeof(ubo));
   cmd.draw(Resources::fsqVbo());
+
+  cmd.setFramebuffer({{viewCldLut, Tempest::Discard, Tempest::Preserve}});
+  cmd.setUniforms(Shaders::inst().skyViewCldLut, uboSkyViewCldLut, &ubo, sizeof(ubo));
+  cmd.draw(Resources::fsqVbo());
   }
 
 void Sky::prepareFog(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint32_t frameId) {
@@ -422,7 +463,7 @@ void Sky::prepareFog(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint32_t fra
     case VolumetricMQ: {
       cmd.setFramebuffer({});
       cmd.setUniforms(Shaders::inst().shadowDownsample, uboShadowDw);
-      cmd.dispatchThreads(uint32_t(shadowDw.w()),uint32_t(shadowDw.h()));
+      cmd.dispatchThreads(shadowDw.size());
 
       cmd.setUniforms(Shaders::inst().fogViewLut3dLQ, uboFogViewLut3d, &ubo, sizeof(ubo));
       cmd.dispatchThreads(uint32_t(fogLut3D.w()),uint32_t(fogLut3D.h()));
@@ -438,7 +479,7 @@ void Sky::prepareFog(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint32_t fra
         int  h  = (occlusionLut.h()+sz.y-1)/sz.y;
         cmd.dispatch(uint32_t((w+1-1)/1), uint32_t((h+1-1)/1));
         } else{
-        cmd.dispatchThreads(uint32_t(occlusionLut.w()),uint32_t(occlusionLut.h()));
+        cmd.dispatchThreads(occlusionLut.size());
         }
 
       cmd.setUniforms(Shaders::inst().fogViewLut3dHQ, uboFogViewLut3d, &ubo, sizeof(ubo));
@@ -488,6 +529,10 @@ void Sky::drawFog(Tempest::Encoder<CommandBuffer>& cmd, uint32_t fId) {
   }
 
 const Texture2d& Sky::skyLut() const {
+  return textureCast(viewCldLut);
+  }
+
+const Texture2d& Sky::clearSkyLut() const {
   return textureCast(viewLut);
   }
 

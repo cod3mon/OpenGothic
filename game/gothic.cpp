@@ -14,7 +14,8 @@
 #include "game/definitions/musicdefinitions.h"
 #include "game/definitions/fightaidefinitions.h"
 #include "game/definitions/particlesdefinitions.h"
-#include "game/serialize.h"
+
+#include "world/objects/npc.h"
 
 #include "utils/fileutil.h"
 #include "utils/inifile.h"
@@ -40,7 +41,21 @@ Gothic::Gothic() {
 
   systemPackIniFile.reset(new IniFile(nestedPath({u"system",u"SystemPack.ini"},Dir::FT_File)));
   showFpsCounter = systemPackIniFile->getI("DEBUG","Show_FPS_Counter");
-  hideFocus      = systemPackIniFile->getI("PARAMETERS","HideFocus");
+  opts.hideFocus = systemPackIniFile->getI("PARAMETERS","HideFocus");
+  opts.cameraFov = systemPackIniFile->getF("PARAMETERS","VerticalFOV");
+  if(opts.cameraFov<1.f) {
+    opts.cameraFov = 67.5;
+    }
+  opts.interfaceScale = systemPackIniFile->getF("INTERFACE","Scale",0);
+  if(opts.interfaceScale<=0) {
+    opts.interfaceScale = 1;
+    }
+  opts.inventoryCellSize = systemPackIniFile->getI("INTERFACE","InventoryCellSize",opts.inventoryCellSize);
+  opts.inventoryCellSize = std::max(opts.inventoryCellSize, 10);
+
+  opts.showHealthBar     = !(systemPackIniFile->getI("INTERFACE","HideHealthBar",0)!=0);
+  opts.showManaBar       = uint8_t(std::clamp(systemPackIniFile->getI("INTERFACE","ShowManaBar",1), 0, 2));
+  opts.showSwimBar       = uint8_t(std::clamp(systemPackIniFile->getI("INTERFACE","ShowSwimBar",1), 0, 2));
 
 #ifndef NDEBUG
   setMarvinEnabled(true);
@@ -49,12 +64,23 @@ Gothic::Gothic() {
   setMarvinEnabled(CommandLine::inst().isDevMode());
 #endif
 
+  auto& gpu = Resources::device().properties();
+  if(gpu.raytracing.rayQuery) {
+    opts.doRayQuery = CommandLine::inst().isRayQuery();
+    opts.doRtGi     = opts.doRayQuery && CommandLine::inst().isRtGi();
+    }
+
+  if(hasMeshShader()) {
+    opts.doMeshShading = CommandLine::inst().isMeshShading();
+    }
+
   wrldDef = CommandLine::inst().wrldDef;
-  if(hasMeshShader())
-    isMeshSh = CommandLine::inst().isMeshShading();
 
   baseIniFile.reset(new IniFile(nestedPath({u"system",u"Gothic.ini"},Dir::FT_File)));
   iniFile    .reset(new IniFile(u"Gothic.ini"));
+  if(!iniFile->has("INTERNAL", "vidResIndex")) {
+    iniFile->set("INTERNAL", "vidResIndex", 0); // full-res
+    }
   {
   defaults.reset(new IniFile());
   defaults->set("GAME", "enableMouse",         1);
@@ -62,8 +88,12 @@ Gothic::Gothic() {
   defaults->set("GAME", "invCatOrder",         "COMBAT,POTION,FOOD,ARMOR,MAGIC,RUNE,DOCS,OTHER,NONE");
   defaults->set("GAME", "invMaxColumns",       5);
   defaults->set("GAME", "animatedWindows",     1);
-  defaults->set("GAME", "useGothic1Controls",  0);
+  defaults->set("GAME", "useGothic1Controls",  1);
   defaults->set("GAME", "highlightMeleeFocus", 0);
+
+  // switch related language options
+  defaults->set("GAME", "language", -1);
+  defaults->set("GAME", "voice",    -1);
 
   defaults->set("SKY_OUTDOOR", "zSunName",   "unsun5.tga");
   defaults->set("SKY_OUTDOOR", "zSunSize",   200);
@@ -72,10 +102,14 @@ Gothic::Gothic() {
   defaults->set("SKY_OUTDOOR", "zMoonSize",  400);
   defaults->set("SKY_OUTDOOR", "zMoonAlpha", 255);
 
-  auto& gpu = Resources::device().properties();
   defaults->set("RENDERER_D3D", "zFogRadial", 1); // sunshafts
   defaults->set("ENGINE",       "zEnvMappingEnabled", 1); // reflections
   defaults->set("ENGINE",       "zCloudShadowScale", gpu.type==Tempest::DeviceType::Discrete); // ssao
+  defaults->set("INTERNAL",     "vidResIndex", 0); // full-res
+
+  defaults->set("VIDEO", "zVidBrightness", 0.5f);
+  defaults->set("VIDEO", "zVidContrast",   0.5f);
+  defaults->set("VIDEO", "zVidGamma",      0.5f);
 
   defaults->set("SOUND", "musicEnabled",  1);
   defaults->set("SOUND", "musicVolume",   0.5f);
@@ -127,7 +161,9 @@ Gothic::Gothic() {
     size_t split = wrldDef.rfind('\\');
     if(split!=std::string::npos)
       wrldDef = wrldDef.substr(split+1);
-    plDef = modFile->getS("SETTINGS","PLAYER");
+    plDef      = modFile->getS("SETTINGS","PLAYER");
+    gameDatDef = modFile->getS("FILES","GAME");
+    ouDef      = modFile->getS("FILES","OUTPUTUNITS");
 
     std::u16string vdf = TextCodec::toUtf16(std::string(modFile->getS("FILES","VDF")));
     modFilter = modFile->has("FILES","VDF");
@@ -149,6 +185,15 @@ Gothic::Gothic() {
   if(plDef.empty())
     plDef = "PC_HERO";
 
+  if(gameDatDef.empty())
+    gameDatDef  = "GOTHIC.DAT"; else
+    gameDatDef += ".DAT";
+
+  if(ouDef.empty()) {
+    // suffixes added later in GameScript::loadDialogOU()
+    ouDef = "OU";
+    }
+
   onSettingsChanged.bind(this,&Gothic::setupSettings);
   setupSettings();
   }
@@ -158,6 +203,7 @@ Gothic::~Gothic() {
   }
 
 Gothic& Gothic::inst() {
+  assert(instance!=nullptr);
   return *instance;
   }
 
@@ -176,6 +222,13 @@ const VersionInfo& Gothic::version() const {
 
 bool Gothic::isInGame() const {
   return game!=nullptr;
+  }
+
+bool Gothic::isInGameAndAlive() const {
+  auto pl = Gothic::inst().player();
+  if(pl==nullptr || pl->isDead())
+    return false;
+  return isInGame();
   }
 
 const World *Gothic::world() const {
@@ -294,7 +347,7 @@ void Gothic::emitGlobalSound(std::string_view sfx) {
 void Gothic::emitGlobalSound(const SoundFx *sfx) {
   if(sfx!=nullptr) {
     bool loop = false;
-    auto s = sfx->getEffect(sndDev,loop);
+    auto s = sfx->load(sndDev,loop);
     s.play();
 
     for(size_t i=0;i<sndStorage.size();){
@@ -363,14 +416,8 @@ void Gothic::setMarvinEnabled(bool m) {
   isMarvin = m;
   }
 
-bool Gothic::doRayQuery() const {
-  if(!Resources::device().properties().raytracing.rayQuery)
-    return false;
-  return CommandLine::inst().isRayQuery();
-  }
-
-bool Gothic::doMeshShading() const {
-  return isMeshSh;
+const Gothic::Options& Gothic::options() {
+  return instance->opts;
   }
 
 Gothic::LoadState Gothic::checkLoading() const {
@@ -419,6 +466,7 @@ void Gothic::implStartLoadSave(std::string_view banner,
   auto g = clearGame().release();
   try{
     auto l = std::thread([this,f,g,one]() noexcept {
+      Workers::setThreadName("Loading thread");
       std::unique_ptr<GameSession> game(g);
       std::unique_ptr<GameSession> next;
       auto curState = one;
@@ -432,8 +480,8 @@ void Gothic::implStartLoadSave(std::string_view banner,
         Tempest::Log::e("loading error: out of memory");
         loadingFlag.compare_exchange_strong(curState,err);
         }
-      catch(std::system_error&){
-        Tempest::Log::e("loading error: unable to open file");
+      catch(std::system_error& e){
+        Tempest::Log::e("loading error: ", e.what());
         loadingFlag.compare_exchange_strong(curState,err);
         }
       catch(std::runtime_error& e){
@@ -566,41 +614,54 @@ std::string_view Gothic::defaultSave() const {
   return CommandLine::inst().defaultSave();
   }
 
-std::unique_ptr<phoenix::vm> Gothic::createPhoenixVm(std::string_view datFile) {
-  auto byte = loadPhoenixScriptCode(datFile);
-  phoenix::register_all_script_classes(byte);
+std::string_view Gothic::defaultGameDatFile() const {
+  return gameDatDef;
+  }
 
-  auto vm = std::make_unique<phoenix::vm>(std::move(byte), phoenix::execution_flag::vm_allow_null_instance_access);
+std::string_view Gothic::defaultOutputUnits() const {
+  return ouDef;
+  }
+
+std::unique_ptr<phoenix::vm> Gothic::createPhoenixVm(std::string_view datFile, const ScriptLang lang) {
+  auto sc = loadScript(datFile, lang);
+  phoenix::register_all_script_classes(sc);
+
+  auto vm = std::make_unique<phoenix::vm>(std::move(sc), phoenix::execution_flag::vm_allow_null_instance_access);
   setupVmCommonApi(*vm);
   return vm;
   }
 
-std::vector<uint8_t> Gothic::loadScriptCode(std::string_view datFile) {
-  if(Resources::hasFile(datFile))
-    return Resources::getFileData(datFile);
-
-  auto gscript = CommandLine::inst().scriptPath();
-  char16_t str16[256] = {};
-  for(size_t i=0; i<datFile.size() && i<255; ++i)
-    str16[i] = char16_t(datFile[i]);
-  auto path = caseInsensitiveSegment(gscript,str16,Dir::FT_File);
-  Tempest::RFile f(path);
-  std::vector<uint8_t> ret(f.size());
-  f.read(ret.data(),ret.size());
-  return ret;
-  }
-
-phoenix::script Gothic::loadPhoenixScriptCode(std::string_view datFile) {
+phoenix::script Gothic::loadScript(std::string_view datFile, const ScriptLang lang) {
   if(Resources::hasFile(datFile)) {
     auto buf = Resources::getFileBuffer(datFile);
     return phoenix::script::parse(buf);
     }
 
-  auto gscript = CommandLine::inst().scriptPath();
+  const size_t segment = datFile.find_last_of("\\/");
+  if(segment!=std::string::npos && Resources::hasFile(datFile.substr(segment+1))) {
+    auto buf = Resources::getFileBuffer(datFile.substr(segment+1));
+    return phoenix::script::parse(buf);
+    }
+
   char16_t str16[256] = {};
   for(size_t i=0; i<datFile.size() && i<255; ++i)
     str16[i] = char16_t(datFile[i]);
-  auto path = caseInsensitiveSegment(gscript,str16,Dir::FT_File);
+
+  auto gscript = CommandLine::inst().scriptPath();
+  auto path    = caseInsensitiveSegment(gscript,str16,Dir::FT_File);
+  if(!FileUtil::exists(path) && int(lang)>=0) {
+    gscript = CommandLine::inst().scriptPath(lang);
+    path    = caseInsensitiveSegment(gscript,str16,Dir::FT_File);
+    }
+  if(!FileUtil::exists(path) && int(lang)>=0) {
+    datFile = datFile.substr(segment+1);
+    for(size_t i=0; i<datFile.size() && i<255; ++i)
+      str16[i] = char16_t(datFile[i]);
+    str16[datFile.size()] = u'\0';
+    gscript = CommandLine::inst().scriptPath(lang);
+    path    = caseInsensitiveSegment(gscript,str16,Dir::FT_File);
+    }
+
   auto buf = phoenix::buffer::mmap(path);
   return phoenix::script::parse(buf);
   }
@@ -691,13 +752,20 @@ void Gothic::detectGothicVersion() {
     vinfo.game = 1; else
     vinfo.game = 2;
 
-  if(CommandLine::inst().doForceG1())
-    vinfo.game = 1;
-  else if(CommandLine::inst().doForceG2())
-    vinfo.game = 2;
-
   if(vinfo.game==2) {
     vinfo.patch = baseIniFile->getI("GAME","PATCHVERSION");
+    }
+
+  if(CommandLine::inst().doForceG1()) {
+    vinfo.game = 1;
+    }
+  else if(CommandLine::inst().doForceG2()) {
+    vinfo.game  = 2;
+    vinfo.patch = 0;
+    }
+  else if(CommandLine::inst().doForceG2NR()) {
+    vinfo.game  = 2;
+    vinfo.patch = 5;
     }
   }
 
@@ -748,12 +816,15 @@ std::unique_ptr<DocumentMenu::Show>& Gothic::getDocument(int id) {
   return empty;
   }
 
-std::u16string Gothic::nestedPath(const std::initializer_list<const char16_t*> &name, Tempest::Dir::FileType type) const {
+std::u16string Gothic::nestedPath(const std::initializer_list<const char16_t*> &name, Tempest::Dir::FileType type) {
   return CommandLine::inst().nestedPath(name,type);
   }
 
 void Gothic::setupVmCommonApi(phoenix::vm &vm) {
   vm.register_default_external([](std::string_view name) { notImplementedRoutine(std::string {name}); });
+
+  if (auto sym = vm.find_symbol_by_name("C_SVM"))
+    vm.register_as_opaque(sym);
 
   vm.register_external("concatstrings", [](std::string_view a, std::string_view b) { return Gothic::concatstrings(a, b);});
   vm.register_external("inttostring",   [](int i)   { return Gothic::inttostring(i);   });
@@ -763,7 +834,6 @@ void Gothic::setupVmCommonApi(phoenix::vm &vm) {
 
   vm.register_external("hlp_strcmp",    [](std::string_view a, std::string_view b) { return Gothic::hlp_strcmp(a, b); });
   vm.register_external("hlp_random",    [this](int max) { return hlp_random(max); });
-
 
   vm.register_external("introducechapter", [this](std::string_view title, std::string_view subtitle, std::string_view img, std::string_view sound, int time){ introducechapter(title, subtitle, img, sound, time); });
   vm.register_external("playvideo",        [this](std::string_view name){ return playvideo(name); });

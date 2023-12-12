@@ -26,6 +26,8 @@ class Marvin {
       // rendering
       C_ToggleFrame,
       C_ToggleTime,
+      // game
+      C_ToggleDesktop,
       // npc
       C_CheatFull,
       C_CheatGod,
@@ -36,6 +38,7 @@ class Marvin {
       C_ToggleCamDebug,
       C_ToggleCamera,
       C_ToggleInertia,
+      C_ZToggleTimeDemo,
 
       C_AiGoTo,
       C_GoToPos,
@@ -44,6 +47,9 @@ class Marvin {
       C_SetTime,
 
       C_Insert,
+
+      // opengothic specific
+      C_ToggleGI,
       };
 
     struct Cmd {

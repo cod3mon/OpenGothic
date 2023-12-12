@@ -18,11 +18,11 @@ layout(location = DEBUG_DRAW_LOC) in flat uint debugId;
 
 #if defined(GBUFFER)
 layout(location = 0) out vec4 outDiffuse;
-layout(location = 1) out vec4 outNormal;
+layout(location = 1) out uint outNormal;
 #elif defined(WATER)
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outDiffuse;
-layout(location = 2) out vec4 outNormal;
+layout(location = 2) out uint outNormal;
 #elif !defined(DEPTH_ONLY)
 layout(location = 0) out vec4 outColor;
 #endif
@@ -36,7 +36,7 @@ float lambert() {
 vec3 diffuseLight() {
   float light  = lambert();
   float shadow = calcShadow(vec4(shInp.pos,1), 0, scene, textureSm0, textureSm1);
-  return scene.sunCl.rgb*light*shadow + scene.ambient;
+  return scene.sunCl.rgb*light*shadow + scene.ambient * scene.sunCl.rgb;
   }
 
 vec4 dbgLambert() {
@@ -79,16 +79,24 @@ vec4 forwardShading(vec4 t) {
   vec3  color = t.rgb;
   float alpha = t.a;
 
+#if defined(ATEST)
+  alpha = (alpha-0.5)*2.0;
+#endif
+
+#if defined(LVL_OBJECT)
+  alpha *= bucket.alphaWeight;
+#endif
+
 #if defined(GHOST)
   color = ghostColor(t.rgb);
 #endif
 
 #if defined(FORWARD)
-  color *= diffuseLight();
+  color *= diffuseLight() * Fd_Lambert;
 #endif
 
 #if defined(EMISSIVE)
-  color *= 10.0;
+  color *= 3.0;
 #elif defined(MAT_LINEAR_CLR)
   color *= scene.exposure;
 #else
@@ -99,11 +107,20 @@ vec4 forwardShading(vec4 t) {
   }
 
 #if defined(WATER)
+float unproject(float depth) {
+  mat4 projInv = scene.projectInv;
+  vec4 o;
+  o.z = depth * projInv[2][2] + projInv[3][2];
+  o.w = depth * projInv[2][3] + projInv[3][3];
+  return o.z/o.w;
+  }
+
 vec4 underWaterColorDepth(vec3 normal) {
   const vec2  fragCoord = (gl_FragCoord.xy*scene.screenResInv)*2.0-vec2(1.0);
   const float ior       = IorWater;
+  //return vec4(0);
 
-  vec4  camPos = scene.viewProjectInv*vec4(0,0,0,1.0);
+  vec4  camPos = scene.viewProjectInv*vec4(0,0,0.0,1.0);
   camPos.xyz /= camPos.w;
 
   const vec3  view   = normalize(shInp.pos - camPos.xyz);
@@ -112,29 +129,21 @@ vec4 underWaterColorDepth(vec3 normal) {
   vec3        back   = texelFetch(sceneColor,   ivec2(gl_FragCoord.xy), 0).rgb;
   const float depth  = texelFetch(gbufferDepth, ivec2(gl_FragCoord.xy), 0).r;
 
-  const float ground = linearDepth(depth, scene.clipInfo.xyz);
-  const float water  = linearDepth(gl_FragCoord.z, scene.clipInfo.xyz);
+  const float ground = unproject(depth);
+  const float water  = unproject(gl_FragCoord.z);
+  float       dist   = (ground-water);
 
-  float dist     = (ground-water);
-  vec3  rPos     = shInp.pos + dist*refr;
-  vec4  rPosScr  = scene.viewProject*vec4(rPos,1.0);
-  rPosScr.xyz /= rPosScr.w;
-  rPosScr.xy += normal.xz*0.1; // non-physical distorsion
-  const vec2  p2 = rPosScr.xy*0.5+vec2(0.5);
+  const vec2 p2 = (gl_FragCoord.xy*scene.screenResInv) + normal.xz * min(dist*0.01,1.0) * 0.1;
 
   float depth2 = textureLod(gbufferDepth, p2, 0).r;
   if(depth2>gl_FragCoord.z) {
     back   = textureLod(sceneColor, p2, 0).rgb;
-    const float ground2 = linearDepth(depth2, scene.clipInfo.xyz);
+    const float ground2 = unproject(depth2);
     dist = (ground2-water);
     } else {
     depth2 = depth;
     }
 
-  vec4 fragPos0 = scene.viewProjectInv*vec4(fragCoord,gl_FragCoord.z,1.0);
-  fragPos0.xyz /= fragPos0.w;
-
-  //vec4 fragPos1 = scene.viewProjectInv*vec4(p2,depth2,1.0);
   vec4 fragPos1 = scene.viewProjectInv*vec4(fragCoord,depth2,1.0);
   fragPos1.xyz /= fragPos1.w;
 
@@ -194,6 +203,19 @@ bool isFlat() {
   return false;
   }
 
+#if defined(GBUFFER)
+vec3 flatNormal() {
+#if defined(GBUFFER) && (MESH_TYPE==T_LANDSCAPE)
+  vec3 pos   = shInp.pos;
+  vec3 dx    = dFdx(pos);
+  vec3 dy    = dFdy(pos);
+  return normalize(cross(dx,dy));
+#else
+  return shInp.normal;
+#endif
+  }
+#endif
+
 float encodeHintBits() {
   const int flt  = (isFlat() ? 1 : 0) << 1;
 #if defined(ATEST)
@@ -204,20 +226,14 @@ float encodeHintBits() {
 
 #if defined(WATER)
   const int water = (gl_FrontFacing) ? 0 : (1 << 3);
+#elif defined(LVL_OBJECT)
+  // const int water = (bucket.envMapping>0.01 ? 1 : 0) << 3;
+  const int water = (0) << 3;
 #else
   const int water = (0) << 3;
 #endif
 
   return float(flt | atst | water)/255.0;
-  }
-
-vec3 encodeNormal(vec3 n) {
-  float l = length(n.xz);
-  if(l>0.0)
-    n.xz /= l;
-  n.y   = l;
-  n.xz = n.xz*0.5 + vec2(0.5);
-  return n;
   }
 
 void main() {
@@ -226,7 +242,6 @@ void main() {
 #  if defined(ATEST)
   if(t.a<0.5)
     discard;
-  t.a = (t.a-0.5)*2.0;
 #  endif
 #endif
 
@@ -235,16 +250,16 @@ void main() {
 #endif
 
 #if defined(MAT_LINEAR_CLR)
-  t.rgb = textureLinear(t.rgb) * PhotoLumInv;
+  t.rgb = textureLinear(t.rgb);
 #endif
 
 #if defined(GBUFFER)
-  // outDiffuse.rgb = vec3(1);
   outDiffuse.rgb = t.rgb;
   outDiffuse.a   = encodeHintBits();
-  outNormal      = vec4(shInp.normal*0.5 + vec3(0.5),1.0);
+  outNormal      = encodeNormal(shInp.normal);
+  // outNormal      = vec4(flatNormal()*0.5 + vec3(0.5), 1.0);
 #if DEBUG_DRAW
-  outDiffuse.rgb *= debugColors[debugId%MAX_DEBUG_COLORS];
+  outDiffuse.rgb *= debugColors[debugId%debugColors.length()];
 #endif
 #endif
 
@@ -263,7 +278,7 @@ void main() {
   outColor       = waterShading(t,wx.normal);
   outDiffuse.rgb = t.rgb;
   outDiffuse.a   = encodeHintBits();
-  outNormal      = vec4(encodeNormal(wx.normal), 0);
+  outNormal      = encodeNormal(wx.normal);
   }
 #elif !defined(GBUFFER) && !defined(DEPTH_ONLY)
   outColor   = forwardShading(t);

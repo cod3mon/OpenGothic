@@ -5,9 +5,10 @@
 #include "objectsbucket.h"
 
 class SceneGlobals;
-class Bindless;
-class AnimMesh;
+class RtScene;
+class Landscape;
 class Sky;
+class AnimMesh;
 
 class VisualObjects final {
   public:
@@ -22,14 +23,18 @@ class VisualObjects final {
                             const Bounds& bbox, ObjectsBucket::Type bucket);
     ObjectsBucket::Item get(const AnimMesh& mesh, const Material& mat,
                             size_t iboOff, size_t iboLen,
-                            const MatrixStorage::Id& anim);
+                            const InstanceStorage::Id& anim);
     ObjectsBucket::Item get(const Material& mat);
 
-    MatrixStorage::Id   getMatrixes(Tempest::BufferHeap heap, size_t boneCnt);
-    auto                matrixSsbo (Tempest::BufferHeap heap, uint8_t fId) const -> const Tempest::StorageBuffer&;
+    InstanceStorage::Id alloc(size_t size);
+    bool                realloc(InstanceStorage::Id& id, size_t size);
+    auto                instanceSsbo() const -> const Tempest::StorageBuffer&;
 
-    void setupUbo();
+    void prepareUniforms();
     void preFrameUpdate (uint8_t fId);
+    void prepareGlobals (Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId);
+    void postFrameupdate();
+
     void visibilityPass (const Frustrum fr[]);
 
     void drawTranslucent(Tempest::Encoder<Tempest::CommandBuffer>& enc, uint8_t fId);
@@ -39,35 +44,22 @@ class VisualObjects final {
     void drawHiZ        (Tempest::Encoder<Tempest::CommandBuffer>& enc, uint8_t fId);
 
     void resetIndex();
-    void resetTlas();
-    void recycle(Tempest::DescriptorSet&& del);
+    void notifyTlas(const Material& m, RtScene::Category cat);
 
-    void updateTlas(Bindless& out, uint8_t fId);
-
-    void setLandscapeBlas(const Tempest::AccelerationStructure* blas);
-    Tempest::Signal<void(const Tempest::AccelerationStructure* tlas)> onTlasChanged;
+    bool updateRtScene(RtScene& out);
 
   private:
-    ObjectsBucket&                  getBucket(ObjectsBucket::Type type, const Material& mat,
-                                              const StaticMesh* st, const AnimMesh* anim, const Tempest::StorageBuffer* desc);
+    ObjectsBucket& getBucket(ObjectsBucket::Type type, const Material& mat,
+                             const StaticMesh* st, const AnimMesh* anim, const Tempest::StorageBuffer* desc);
+    void           mkIndex();
 
-    void                            mkIndex();
-    void                            commitUbo(uint8_t fId);
-
-    const SceneGlobals&             globals;
-    VisibilityGroup                 visGroup;
-    MatrixStorage                   matrix;
+    const SceneGlobals&                         globals;
+    VisibilityGroup                             visGroup;
+    InstanceStorage                             instanceMem;
 
     std::vector<std::unique_ptr<ObjectsBucket>> buckets;
     std::vector<ObjectsBucket*>                 index;
     size_t                                      lastSolidBucket = 0;
-
-    std::vector<Tempest::DescriptorSet>         recycled[Resources::MaxFramesInFlight];
-    uint8_t                                     recycledId = 0;
-
-    bool                                        needtoInvalidateTlas = false;
-    Tempest::AccelerationStructure              tlas;
-    const Tempest::AccelerationStructure*       landBlas = nullptr;
 
   friend class ObjectsBucket;
   friend class ObjectsBucket::Item;

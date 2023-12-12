@@ -7,6 +7,7 @@
 
 #include "utils/string_frm.h"
 #include "world/objects/npc.h"
+#include "world/triggers/abstracttrigger.h"
 #include "camera.h"
 #include "gothic.h"
 
@@ -95,7 +96,7 @@ Marvin::Marvin() {
     {"set time %d %d",             C_SetTime},
     {"spawnmass %d",               C_Invalid},
     {"spawnmass giga %d",          C_Invalid},
-    {"toggle desktop",             C_Invalid},
+    {"toggle desktop",             C_ToggleDesktop},
     {"toggle freepoints",          C_Invalid},
     {"toggle screen",              C_Invalid},
     {"toggle time",                C_ToggleTime},
@@ -125,7 +126,10 @@ Marvin::Marvin() {
     {"toggle camdebug",            C_ToggleCamDebug},
     {"toggle camera",              C_ToggleCamera},
     {"toggle inertiatarget",       C_ToggleInertia},
+    {"ztoggle timedemo",           C_ZToggleTimeDemo},
     {"insert %c",                  C_Insert},
+
+    {"toggle gi",                  C_ToggleGI},
     };
   }
 
@@ -328,6 +332,18 @@ bool Marvin::exec(std::string_view v) {
         c->setInertiaTargetEnable(!c->isInertiaTargetEnabled());
       return true;
       }
+    case C_ZToggleTimeDemo: {
+      World* world = Gothic::inst().world();
+      if(world==nullptr)
+        return false;
+      const TriggerEvent evt("TIMEDEMO","",world->tickCount(),TriggerEvent::T_Trigger);
+      world->triggerEvent(evt);
+      return true;
+      }
+    case C_ToggleDesktop: {
+      Gothic::inst().toggleDesktop();
+      return true;
+      }
     case C_Insert: {
       World* world  = Gothic::inst().world();
       Npc*   player = Gothic::inst().player();
@@ -348,6 +364,10 @@ bool Marvin::exec(std::string_view v) {
         return false;
       return printVariable(world, ret.argv[0]);
       }
+
+    case C_ToggleGI:
+      Gothic::inst().toggleGi();
+      return true;
     }
 
   return true;

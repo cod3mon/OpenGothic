@@ -23,12 +23,11 @@ class GameMenu : public Tempest::Widget {
   public:
     GameMenu(MenuRoot& owner, KeyCodec& keyCodec, phoenix::vm& vm, std::string_view menuSection, KeyCodec::Action keyClose);
     ~GameMenu() override;
+    void resetVm(phoenix::vm* vm);
 
     void setPlayer(const Npc& pl);
 
-    void onMove (int dy);
-    void onSlide(int dx);
-    void onSelect();
+    void onKeyboard(KeyCodec::Action k);
     void onTick();
     void processMusicTheme();
 
@@ -63,7 +62,7 @@ class GameMenu : public Tempest::Widget {
 
     MenuRoot&                             owner;
     KeyCodec&                             keyCodec;
-    phoenix::vm&                vm;
+    phoenix::vm*                          vm = nullptr;
     Tempest::Timer                        timer;
     const Tempest::Texture2d*             up   = nullptr;
     const Tempest::Texture2d*             down = nullptr;
@@ -94,7 +93,9 @@ class GameMenu : public Tempest::Widget {
     void                                  initItems();
     void                                  getText(const Item &it, std::vector<char>& out);
     const GthFont&                        getTextFont(const Item &it);
+
     static bool                           isSelectable(const std::shared_ptr<phoenix::c_menu_item>& item);
+    static bool                           isHorSelectable(const std::shared_ptr<phoenix::c_menu_item>& item);
     static bool                           isEnabled(const std::shared_ptr<phoenix::c_menu_item>& item);
     static bool                           isHidden(const std::shared_ptr<phoenix::c_menu_item>& item);
 
@@ -118,7 +119,6 @@ class GameMenu : public Tempest::Widget {
     void                                  updateVideo();
     void                                  setDefaultKeys(std::string_view preset);
 
-    static bool                           isInGameAndAlive();
     static QuestStat                      toStatus(std::string_view str);
     static bool                           isCompatible(const QuestLog::Quest& q, QuestStat st);
     static int32_t                        numQuests(const QuestLog* q, QuestStat st);

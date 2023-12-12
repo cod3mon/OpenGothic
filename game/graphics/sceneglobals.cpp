@@ -39,7 +39,7 @@ SceneGlobals::SceneGlobals()
   auto& copy = Shaders::inst().copyBuf;
   for(uint8_t fId=0; fId<Resources::MaxFramesInFlight; ++fId)
     for(uint8_t lay=0; lay<V_Count; ++lay) {
-      uboGlobalPf[fId][lay] = device.ubo<UboGlobal>(nullptr,1);
+      uboGlobalPf[fId][lay] = device.ubo(UboGlobal());
       uboCopy[fId][lay] = device.descriptors(copy);
       uboCopy[fId][lay].set(0, uboGlobal[lay]);
       uboCopy[fId][lay].set(1, uboGlobalPf[fId][lay]);
@@ -53,9 +53,9 @@ SceneGlobals::~SceneGlobals() {
 void SceneGlobals::initSettings() {
   zWindEnabled = Gothic::inst().settingsGetI("ENGINE","zWindEnabled")!=0;
 
-  float peroid  = Gothic::inst().settingsGetF("ENGINE","zWindCycleTime");
-  float peroidV = Gothic::inst().settingsGetF("ENGINE","zWindCycleTimeVar");
-  windPeriod = uint64_t((peroid+peroidV)*1000.f);
+  float period  = Gothic::inst().settingsGetF("ENGINE","zWindCycleTime");
+  float periodV = Gothic::inst().settingsGetF("ENGINE","zWindCycleTimeVar");
+  windPeriod = uint64_t((period+periodV)*1000.f);
   if(windPeriod<=0) {
     windPeriod   = 1;
     zWindEnabled = false;
@@ -73,6 +73,8 @@ void SceneGlobals::setViewProject(const Tempest::Matrix4x4& v, const Tempest::Ma
 
   uboGlobalCpu.view           = v;
   uboGlobalCpu.project        = p;
+  uboGlobalCpu.projectInv     = p;
+  uboGlobalCpu.projectInv.inverse();
   uboGlobalCpu.viewProject    = vp;
   uboGlobalCpu.viewProjectInv = vp;
   uboGlobalCpu.viewProjectInv.inverse();
@@ -138,7 +140,7 @@ void SceneGlobals::setTime(uint64_t time) {
 
 void SceneGlobals::commitUbo(uint8_t fId) {
   UboGlobal perView[V_Count];
-  uboGlobalPf[fId][V_Main].update(&uboGlobalCpu,0,1);
+  uboGlobalPf[fId][V_Main].update(&uboGlobalCpu);
 
   for(size_t i=V_Shadow0; i<V_Count; ++i) {
     auto& ubo = perView[i];
@@ -149,13 +151,14 @@ void SceneGlobals::commitUbo(uint8_t fId) {
     }
 
   for(size_t i=0; i<V_Count; ++i) {
-    uboGlobalPf[fId][i].update(&perView[i],0,1);
+    uboGlobalPf[fId][i].update(&perView[i]);
     }
   }
 
 void SceneGlobals::prepareGlobals(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId) {
   static_assert(sizeof(UboGlobal)%sizeof(uint32_t)==0);
 
+  cmd.setDebugMarker("Update globals");
   auto& pso = Shaders::inst().copyBuf;
   for(uint8_t lay=0; lay<V_Count; ++lay) {
     cmd.setUniforms(pso, uboCopy[fId][lay]);

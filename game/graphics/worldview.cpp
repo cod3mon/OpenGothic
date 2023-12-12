@@ -13,10 +13,6 @@ WorldView::WorldView(const World& world, const PackedMesh& wmesh)
   : owner(world),gSky(sGlobal,world,wmesh.bbox()),visuals(sGlobal,wmesh.bbox()),
     objGroup(visuals),pfxGroup(*this,sGlobal,visuals),land(visuals,wmesh) {
   pfxGroup.resetTicks();
-  if(Gothic::inst().doRayQuery())
-    tlasLand = Resources::device().tlas({{Matrix4x4::mkIdentity(),0,Tempest::RtInstanceFlags::Opaque,&land.rt.blas}});
-  visuals.setLandscapeBlas(&land.rt.blas);
-  visuals.onTlasChanged.bind(this,&WorldView::setupTlas);
   }
 
 WorldView::~WorldView() {
@@ -52,8 +48,6 @@ void WorldView::preFrameUpdate(const Camera& camera, uint64_t tickCount, uint8_t
     shadowLwc[i] = camera.viewShadowLwc(ldir,i);
     }
 
-  visuals.updateTlas(sGlobal.bindless,fId);
-
   sGlobal.setSky(gSky);
   sGlobal.setViewProject(camera.view(),camera.projective(),camera.zNear(),camera.zFar(),shadow);
   sGlobal.setViewLwc(camera.viewLwc(),camera.projective(),shadowLwc);
@@ -71,7 +65,8 @@ void WorldView::preFrameUpdate(const Camera& camera, uint64_t tickCount, uint8_t
   }
 
 void WorldView::prepareGlobals(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId) {
-  sGlobal.prepareGlobals(cmd,fId);
+  sGlobal.prepareGlobals(cmd, fId);
+  visuals.prepareGlobals(cmd, fId);
   }
 
 void WorldView::setGbuffer(const Texture2d& diffuse, const Texture2d& norm) {
@@ -195,27 +190,30 @@ MeshObjects::Mesh WorldView::addDecalView(const phoenix::vob& vob) {
   return MeshObjects::Mesh();
   }
 
-const AccelerationStructure& WorldView::landscapeTlas() {
-  return tlasLand;
-  }
-
 void WorldView::updateLight() {
   const int64_t now = owner.time().timeInDay().toInt();
   gSky.updateLight(now);
   }
 
-void WorldView::setupUbo() {
+bool WorldView::updateRtScene() {
+  if(!Gothic::inst().options().doRayQuery)
+    return false;
+  if(!visuals.updateRtScene(sGlobal.rtScene))
+    return false;
+  // assume device-idle, if RT scene was recreated
+  sGlobal.lights.prepareRtUniforms();
+  return true;
+  }
+
+void WorldView::prepareUniforms() {
   // wait before update all descriptors, cmd buffers must not be in use
   Resources::device().waitIdle();
   sGlobal.skyLut = &gSky.skyLut();
-  sGlobal.lights.setupUbo();
-  gSky.setupUbo();
-  visuals.setupUbo();
+  sGlobal.lights.prepareUniforms();
+  gSky.prepareUniforms();
+  visuals.prepareUniforms();
   }
 
-void WorldView::setupTlas(const Tempest::AccelerationStructure* tlas) {
-  sGlobal.tlas = tlas;
-  //sGlobal.tlas = &tlasLand;
-  setupUbo();
-  onTlasChanged(tlas);
+void WorldView::postFrameupdate() {
+  visuals.postFrameupdate();
   }

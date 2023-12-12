@@ -5,14 +5,22 @@
 
 using namespace Tempest;
 
+GthFont::GthFont():pfnt(new phoenix::font("", 16, {})) {
+  }
 
 GthFont::GthFont(phoenix::buffer data, std::string_view ftex, const Color &cl)
-  :fnt(phoenix::font::parse(data)), color(cl) {
+  :pfnt(new phoenix::font(phoenix::font::parse(data))), color(cl) {
   tex = Resources::loadTexture(ftex);
+  setScale(1);
   }
 
 int GthFont::pixelSize() const {
-  return int(fnt.height);
+  return int(fntHeight);
+  }
+
+void GthFont::setScale(float s) {
+  scale     = s;
+  fntHeight = uint32_t(std::max(float(pfnt->height)*scale, 1.f)); // avoid division by zero
   }
 
 void GthFont::drawText(Painter &p, int bx, int by, int bw, int bh,
@@ -29,6 +37,7 @@ void GthFont::drawText(Painter &p, int bx, int by, int bw, int bh,
 Size GthFont::processText(Painter* p, int bx, int by, int bw, int bh,
                           std::string_view txtView, AlignFlag align, int firstLine) const {
   const uint8_t* txt = reinterpret_cast<const uint8_t*>(txtView.data());
+  const auto&    fnt = *pfnt;
 
   int   h  = pixelSize();
   int   x  = bx, y=by-h;
@@ -73,7 +82,7 @@ Size GthFont::processText(Painter* p, int bx, int by, int bw, int bh,
       uint8_t id  = *i;
       auto&   uv1 = fnt.glyphs[id].uv[0];
       auto&   uv2 = fnt.glyphs[id].uv[1];
-      int     w   = fnt.glyphs[id].width;
+      int     w   = int(fnt.glyphs[id].width * scale);
 
       if(p!=nullptr) {
         p->drawRect(x,y, w,h,
@@ -95,6 +104,7 @@ void GthFont::drawText(Tempest::Painter &p, int bx, int by, std::string_view txt
     return;
 
   const uint8_t* txt = reinterpret_cast<const uint8_t*>(txtChar.data());
+  const auto&    fnt = *pfnt;
 
   auto b = p.brush();
   p.setBrush(Brush(*tex,color));
@@ -108,7 +118,7 @@ void GthFont::drawText(Tempest::Painter &p, int bx, int by, std::string_view txt
     uint8_t id  = txt[i];
     auto&   uv1 = fnt.glyphs[id].uv[0];
     auto&   uv2 = fnt.glyphs[id].uv[1];
-    int     w   = fnt.glyphs[id].width;
+    int     w   = int(fnt.glyphs[id].width * scale);
 
     p.drawRect(x,y, w,h,
                tw*uv1.x,th*uv1.y, tw*uv2.x,th*uv2.y);
@@ -130,6 +140,8 @@ Size GthFont::textSize(const char* cb, const char* ce) const {
   }
 
 Size GthFont::textSize(const uint8_t* b, const uint8_t* e) const {
+  const auto& fnt = *pfnt;
+
   int h  = pixelSize();
   int x  = 0, y = h;
   int totalW = 0;
@@ -148,8 +160,12 @@ Size GthFont::textSize(const uint8_t* b, const uint8_t* e) const {
       y+=h;
       x=0;
       }
+    else if(id>=fnt.glyphs.size()) {
+      x += 10;
+      ++i;
+      }
     else {
-      int w = fnt.glyphs[id].width;
+      int w = int(fnt.glyphs[id].width * scale);
       x += w;
       ++i;
       }
@@ -199,13 +215,14 @@ const uint8_t* GthFont::getWord(const uint8_t *txt, int& width, int& space) cons
   width = 0;
   space = 0;
 
+  const auto& fnt = *pfnt;
   while(true) {
     uint8_t id = *txt;
     if(id=='\0' || id=='\n')
       return txt;
     if(id!=' ')
       break;
-    space += fnt.glyphs[id].width;
+    space += int(fnt.glyphs[id].width * scale);
     ++txt;
     }
 
@@ -214,7 +231,7 @@ const uint8_t* GthFont::getWord(const uint8_t *txt, int& width, int& space) cons
     if(id=='\0' || id=='\n' || id==' ')
       return txt;
 
-    width += fnt.glyphs[id].width;
+    width += int(fnt.glyphs[id].width * scale);
     ++txt;
     }
   }

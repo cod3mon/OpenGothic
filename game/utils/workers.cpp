@@ -1,12 +1,16 @@
 #include "workers.h"
 #include "utils/string_frm.h"
 
+#include <Tempest/Platform>
 #include <Tempest/Log>
 
-#if defined(_MSC_VER)
+#if defined(__WINDOWS__)
 #include <windows.h>
+#include <processthreadsapi.h>
+#endif
 
-void setThreadName(const char* threadName) {
+#if defined(_MSC_VER)
+void Workers::setThreadName(const char* threadName) {
   const DWORD MS_VC_EXCEPTION = 0x406D1388;
   DWORD dwThreadID = GetCurrentThreadId();
 #pragma pack(push,8)
@@ -29,15 +33,35 @@ void setThreadName(const char* threadName) {
   __except(EXCEPTION_EXECUTE_HANDLER) {
     }
   }
+#elif defined(__WINDOWS__)
+void Workers::setThreadName(const char* threadName) {
+#if defined(__GNUC__)
+  pthread_setname_np(pthread_self(), threadName);
+#endif
+  auto k32 = GetModuleHandleA("Kernel32");
+  auto fn  = GetProcAddress(k32, "SetThreadDescription");
+  if(fn==nullptr)
+    return;
+
+  // nsight does not care about pthread_setname_np
+  WCHAR wname[64] = {};
+  for(size_t i=0; i<63 && threadName[i]; ++i)
+    wname[i] = WCHAR(threadName[i]);
+  auto SetThreadDescription = reinterpret_cast<HRESULT(WINAPI*)(HANDLE,PCWSTR)>(fn);
+  SetThreadDescription(GetCurrentThread(), wname);
+  }
 #elif defined(__GNUC__) && !defined(__clang__)
-void setThreadName(const char* threadName){
+void Workers::setThreadName(const char* threadName){
   pthread_setname_np(pthread_self(), threadName);
   }
 #else
-void setThreadName(const char* threadName){ (void)threadName; }
+void Workers::setThreadName(const char* threadName) { (void)threadName; }
 #endif
 
 using namespace Tempest;
+
+const size_t Workers::taskPerThread = 128;
+const size_t Workers::taskPerStep   = 16;
 
 Workers::Workers() {
   size_t id=0;
@@ -50,9 +74,10 @@ Workers::Workers() {
   }
 
 Workers::~Workers() {
-  running   = false;
-  workTasks = MAX_THREADS;
-  execWork();
+  running  = false;
+  workSet  = nullptr;
+  workSize = MAX_THREADS;
+  execWork(minWorkSize<void,void>());
   for(auto& i:th)
     i.join();
   }
@@ -60,6 +85,15 @@ Workers::~Workers() {
 Workers &Workers::inst() {
   static Workers w;
   return w;
+  }
+
+uint8_t Workers::maxThreads() {
+  int32_t th = int32_t(std::thread::hardware_concurrency());
+  if(th<=0)
+    th = 1;
+  if(th>MAX_THREADS)
+    return MAX_THREADS;
+  return uint8_t(th);
   }
 
 void Workers::threadFunc(size_t id) {
@@ -71,43 +105,95 @@ void Workers::threadFunc(size_t id) {
   while(true) {
     {
     std::unique_lock<std::mutex> lck(sync);
-    while(!workInc[id])
-      workWait.wait(lck);
-    workInc[id]=false;
+    workWait.wait(lck, [this]() { return workTbd>0; });
+    --workTbd;
     }
 
     if(!running) {
-      workDone.fetch_add(1);
+      taskDone.fetch_add(1);
       return;
       }
 
-    size_t b = std::min((id  )*batchSize, workSize);
-    size_t e = std::min((id+1)*batchSize, workSize);
-    // Log::d("worker: id = ",id," [",b, ", ",e,"]");
-
-    if(b!=e) {
-      void* d = workSet + b*workEltSize;
-      workFunc(d,e-b);
+    if(workSet==nullptr) {
+      auto idx = progressIt.fetch_add(1);
+      workFunc(workSet+idx, 1);
+      } else {
+      taskLoop();
       }
 
-    if(size_t(workDone.fetch_add(1)+1)==workTasks)
-      std::this_thread::yield();
+    taskDone.fetch_add(1);
+    // if(size_t(taskDone.fetch_add(1)+1)==taskCount)
+    //   std::this_thread::yield();
     }
   }
 
-void Workers::execWork() {
-  {
-    std::unique_lock<std::mutex> lck(sync);
-    for(size_t i=0; i<workTasks; ++i)
-      workInc[i]=true;
-    workWait.notify_all();
+uint32_t Workers::taskLoop() {
+  uint32_t count = 0;
+  while(true) {
+    size_t b = size_t(progressIt.fetch_add(taskPerStep));
+    size_t e = std::min(b+taskPerStep, workSize);
+    if(e<=b)
+      break;
+
+    void* d = workSet + b*workEltSize;
+    workFunc(d,e-b);
+    count += uint32_t(e-b);
+    }
+  return count;
   }
-  std::this_thread::yield();
+
+void Workers::execWork(uint32_t& minElts) {
+  if(workSize==0)
+    return;
+
+  if(workSet!=nullptr) {
+    const auto maxTheads = maxThreads();
+    taskCount = uint32_t((workSize+taskPerThread-1)/taskPerThread);
+    taskCount--; // main thread also do tasks
+    if(taskCount>maxTheads)
+      taskCount = maxTheads;
+    if(taskCount<=0)
+      taskCount = 1;
+    } else {
+    taskCount = uint32_t(workSize);
+    }
+
+  if(running && taskCount==1) {
+    workFunc(workSet, workSize);
+    return;
+    }
+
+  minElts = std::max<uint32_t>(minElts, taskPerThread);
+
+  if(workSet!=nullptr && workSize<=minElts && true) {
+    workFunc(workSet, workSize);
+    if(minElts > workSize*2)
+      minElts = 0;
+    return;
+    }
+
+  progressIt.store(0);
+  taskDone.store(0);
+
+  {
+  std::unique_lock<std::mutex> lck(sync);
+  workTbd = int32_t(taskCount);
+  }
+  workWait.notify_all();
+
+  uint32_t cnt = 0;
+  if(workSet==nullptr) {
+    std::this_thread::yield();
+    } else {
+    cnt = taskLoop(); (void)cnt;
+    }
 
   while(true) {
-    int expect = int(workTasks);
-    if(workDone.compare_exchange_strong(expect,0,std::memory_order::acq_rel))
+    int expect = int(taskCount);
+    if(taskDone.load()==expect) {
+      taskDone.store(0);
       break;
+      }
     std::this_thread::yield();
     }
   }

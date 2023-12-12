@@ -10,6 +10,7 @@ struct SceneDesc {
   mat4  viewShadowLwc[2];
   mat4  view;
   mat4  project;
+  mat4  projectInv;
   vec3  sunDir;
   float waveAnim;
   vec3  ambient;
@@ -26,9 +27,9 @@ struct SceneDesc {
   vec3  pfxLeft;
   uint  underWater;
   vec3  pfxTop;
-  // float padd2;
+  float padd2; // WORKAROUND: spirv-cross
   vec3  pfxDepth;
-  // float padd3;
+  float padd3; // WORKAROUND: spirv-cross
   ivec2 hiZTileSize;
   ivec2 screenRes;
   vec4  cloudsDir;

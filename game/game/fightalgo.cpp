@@ -2,6 +2,7 @@
 
 #include <Tempest/Log>
 
+#include "game/definitions/fightaidefinitions.h"
 #include "world/objects/npc.h"
 #include "world/objects/item.h"
 #include "gothic.h"
@@ -28,9 +29,6 @@ void FightAlgo::fillQueue(Npc &npc, Npc &tg, GameScript& owner) {
   auto& ai = Gothic::fai()[size_t(npc.handle().fight_tactic)];
   auto  ws = npc.weaponState();
 
-  if(ws==WeaponState::NoWeapon)
-    return;
-
   if(hitFlg) {
     hitFlg = false;
     if(fillQueue(owner,ai.my_w_strafe))
@@ -49,18 +47,18 @@ void FightAlgo::fillQueue(Npc &npc, Npc &tg, GameScript& owner) {
 
   if(ws==WeaponState::Fist || ws==WeaponState::W1H || ws==WeaponState::W2H) {
     if(isInWRange(npc,tg,owner)) {
-      if(npc.bodyStateMasked()==BS_RUN && focus)
-        if(fillQueue(owner,ai.my_w_runto))
-          return;
       if(focus)
         if(fillQueue(owner,ai.my_w_focus))
+          return;
+      if(focus && npc.bodyStateMasked()==BS_RUN)
+        if(fillQueue(owner,ai.my_w_runto))
           return;
       if(fillQueue(owner,ai.my_w_nofocus))
         return;
       }
 
     if(isInGRange(npc,tg,owner)) {
-      if(npc.bodyStateMasked()==BS_RUN && focus)
+      if(focus && npc.bodyStateMasked()==BS_RUN)
         if(fillQueue(owner,ai.my_g_runto))
           return;
       if(focus)
@@ -105,10 +103,14 @@ FightAlgo::Action FightAlgo::nextFromQueue(Npc& npc, Npc& tg, GameScript& owner)
   if(tr[0]==MV_NULL) {
     switch(queueId) {
       case c_fight_ai_move::turn:
+        if(!isInGRange(npc,tg,owner))
+          tr[0] = MV_TURNG; else
+          tr[0] = MV_TURNA;
+        break;
       case c_fight_ai_move::run:{
-        if(isInGRange(npc,tg,owner))
-          tr[0] = MV_MOVEA; else
-          tr[0] = MV_MOVEG;
+        if(!isInGRange(npc,tg,owner))
+          tr[0] = MV_MOVEG; else
+          tr[0] = MV_MOVEA;
         break;
         }
       case c_fight_ai_move::run_back:{
@@ -124,45 +126,45 @@ FightAlgo::Action FightAlgo::nextFromQueue(Npc& npc, Npc& tg, GameScript& owner)
         break;
         }
       case c_fight_ai_move::attack:{
-        tr[0] = MV_ATACK;
+        tr[0] = MV_ATTACK;
         break;
         }
       case c_fight_ai_move::attack_side:{
-        tr[0] = MV_ATACKL;
-        tr[1] = MV_ATACKR;
+        tr[0] = MV_ATTACKL;
+        tr[1] = MV_ATTACKR;
         break;
         }
       case c_fight_ai_move::attack_front:{
-        tr[0] = owner.rand(2) ? MV_ATACKL : MV_ATACKR;
-        tr[1] = MV_ATACK;
+        tr[0] = owner.rand(2) ? MV_ATTACKL : MV_ATTACKR;
+        tr[1] = MV_ATTACK;
         break;
         }
       case c_fight_ai_move::attack_triple:{
         if(owner.rand(2)){
-          tr[0] = MV_ATACK;
-          tr[1] = MV_ATACKR;
-          tr[2] = MV_ATACKL;
+          tr[0] = MV_ATTACK;
+          tr[1] = MV_ATTACKR;
+          tr[2] = MV_ATTACKL;
           } else {
-          tr[0] = MV_ATACKL;
-          tr[1] = MV_ATACKR;
-          tr[2] = MV_ATACK;
+          tr[0] = MV_ATTACKL;
+          tr[1] = MV_ATTACKR;
+          tr[2] = MV_ATTACK;
           }
         break;
         }
       case c_fight_ai_move::attack_whirl:{
-        tr[0] = MV_ATACKL;
-        tr[1] = MV_ATACKR;
-        tr[2] = MV_ATACKL;
-        tr[3] = MV_ATACKR;
+        tr[0] = MV_ATTACKL;
+        tr[1] = MV_ATTACKR;
+        tr[2] = MV_ATTACKL;
+        tr[3] = MV_ATTACKR;
         break;
         }
       case c_fight_ai_move::attack_master:{
-        tr[0] = MV_ATACKL;
-        tr[1] = MV_ATACKR;
-        tr[2] = MV_ATACK;
-        tr[3] = MV_ATACK;
-        tr[4] = MV_ATACK;
-        tr[5] = MV_ATACK;
+        tr[0] = MV_ATTACKL;
+        tr[1] = MV_ATTACKR;
+        tr[2] = MV_ATTACK;
+        tr[3] = MV_ATTACK;
+        tr[4] = MV_ATTACK;
+        tr[5] = MV_ATTACK;
         break;
         }
       case c_fight_ai_move::turn_to_hit:{
@@ -250,10 +252,13 @@ float FightAlgo::prefferedGDistance(const Npc& npc, const Npc& tg, GameScript &o
   }
 
 bool FightAlgo::isInAttackRange(const Npc &npc,const Npc &tg, GameScript &owner) const {
-  auto& gv     = owner.guildVal();
-  float baseTg = float(gv.fight_range_base[tg .guild()]);
+  // tested in vanilla on Bloofly's:
+  //  60 weapon range (Spiked club) is not enough to hit
+  //  70 weapon range (Rusty Sword) is good to hit
   auto  dist   = npc.qDistTo(tg);
-  auto  pd     = baseTg + prefferedAttackDistance(npc,tg,owner);
+  auto  pd     = prefferedAttackDistance(npc,tg,owner);
+  if(npc.hasState(BS_RUN))
+    pd += 20; // padding, for wolf
   return (dist<=pd*pd);
   }
 
@@ -264,8 +269,8 @@ bool FightAlgo::isInWRange(const Npc& npc, const Npc& tg, GameScript& owner) con
   }
 
 bool FightAlgo::isInGRange(const Npc &npc, const Npc &tg, GameScript &owner) const {
-  auto dist = npc.qDistTo(tg);
-  auto pd   = prefferedGDistance(npc,tg,owner);
+  auto  dist    = npc.qDistTo(tg);
+  auto  pd      = prefferedGDistance(npc,tg,owner);
   return (dist<=pd*pd);
   }
 

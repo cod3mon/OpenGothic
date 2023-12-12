@@ -49,7 +49,7 @@ void Pose::save(Serialize &fout) {
   uint8_t sz=uint8_t(lay.size());
   fout.write(sz);
   for(auto& i:lay) {
-    fout.write(i.seq->name,i.sAnim,i.bs,i.blendOut);
+    fout.write(i.seq->name,i.sAnim,i.bs,i.sBlend);
     }
   fout.write(lastUpdate);
   fout.write(combo.bits);
@@ -76,7 +76,7 @@ void Pose::load(Serialize &fin, const AnimationSolver& solver) {
   for(auto& i:lay) {
     fin.read(name,i.sAnim,i.bs);
     if(fin.version()>43)
-      fin.read(i.blendOut);
+      fin.read(i.sBlend);
     i.seq = solver.solveFrm(name);
     }
   fin.read(lastUpdate);
@@ -121,6 +121,13 @@ BodyState Pose::bodyState() const {
 bool Pose::hasState(BodyState s) const {
   for(auto& i:lay)
     if(i.bs==s)
+      return true;
+  return false;
+  }
+
+bool Pose::hasStateFlag(BodyState f) const {
+  for(auto& i:lay)
+    if((i.bs & (BS_FLAG_MASK | BS_MOD_MASK))==f)
       return true;
   return false;
   }
@@ -177,19 +184,19 @@ bool Pose::startAnim(const AnimationSolver& solver, const Animation::Sequence *s
         string_frm tansition("T_",i.seq->shortName,"_2_",sq->shortName);
         tr = solver.solveFrm(tansition);
         }
-      if(tr==nullptr && sq->shortName!=nullptr) {
+      if(tr==nullptr && sq->shortName!=nullptr && i.bs==BS_STAND) {
         string_frm tansition("T_STAND_2_",sq->shortName);
         tr = solver.solveFrm(tansition);
         }
-      if(tr==nullptr && i.seq->shortName!=nullptr && sq->isIdle()) {
+      if(tr==nullptr && i.seq->shortName!=nullptr && bs==BS_STAND) {
         string_frm tansition("T_",i.seq->shortName,"_2_STAND");
         tr = solver.solveFrm(tansition);
         bs = tr ? i.bs : bs;
         }
       onRemoveLayer(i);
-      i.blendOut = i.seq->blendOut;
       i.seq      = tr ? tr : sq;
       i.sAnim    = tickCount;
+      i.sBlend   = 0;
       i.comb     = comb;
       i.bs       = bs;
       onAddLayer(i);
@@ -316,7 +323,7 @@ bool Pose::update(uint64_t tickCount) {
         if(auto sx = i.seq->comb[size_t(i.comb-1)])
           seq = sx;
         }
-      needToUpdate |= updateFrame(*seq,i.bs,lastUpdate,i.sAnim,tickCount);
+      needToUpdate |= updateFrame(*seq,i.bs,i.sBlend,lastUpdate,i.sAnim,tickCount);
       }
     lastUpdate = tickCount;
     }
@@ -329,7 +336,7 @@ bool Pose::update(uint64_t tickCount) {
   return false;
   }
 
-bool Pose::updateFrame(const Animation::Sequence &s, BodyState bs,
+bool Pose::updateFrame(const Animation::Sequence &s, BodyState bs, uint64_t sBlend,
                        uint64_t barrier, uint64_t sTime, uint64_t now) {
   auto&        d         = *s.data;
   const size_t numFrames = d.numFrames;
@@ -365,7 +372,9 @@ bool Pose::updateFrame(const Animation::Sequence &s, BodyState bs,
   auto* sampleA = &d.samples[size_t(frameA*idSize)];
   auto* sampleB = &d.samples[size_t(frameB*idSize)];
 
-  const uint64_t blend = std::max(s.blendOut,s.blendIn);
+  const uint64_t blendMax = std::max(s.blendOut,s.blendIn);
+  const uint64_t blend    = std::max<uint64_t>(0, now-sBlend);
+
   for(size_t i=0; i<idSize; ++i) {
     size_t idx = d.nodeIndex[i];
     if(idx>=numBones)
@@ -388,8 +397,9 @@ bool Pose::updateFrame(const Animation::Sequence &s, BodyState bs,
         prev      [idx] = base[idx];
         [[fallthrough]];
       case S_Valid:
-        if(now<blend) {
-          float a2 = float(now)/float(blend);
+        if(blend < blendMax) {
+          float a2 = float(blend)/float(blendMax);
+          assert(0.f<=a2 && a2<=1.f);
           base[idx] = mix(prev[idx],smp,a2);
           } else {
           prev[idx] = smp;
@@ -506,10 +516,6 @@ void Pose::onAddLayer(const Pose::Layer& l) {
   if(l.seq->animCls==Animation::Transition)
     hasTransitions++;
   needToUpdate = true;
-
-  for(auto id:l.seq->data->nodeIndex)
-    if(hasSamples[id]==S_Valid)
-      hasSamples[id] = S_Old;
   }
 
 void Pose::onRemoveLayer(const Pose::Layer &l) {
@@ -521,6 +527,16 @@ void Pose::onRemoveLayer(const Pose::Layer &l) {
     hasTransitions--;
   if(l.seq->isFly())
     isFlyCombined--;
+
+  for(auto id:l.seq->data->nodeIndex)
+    if(hasSamples[id]==S_Valid)
+      hasSamples[id] = S_Old;
+
+  for(auto& lx : lay) {
+    if(&lx==&l)
+      break;
+    lx.sBlend = lastUpdate-lx.sAnim;
+    }
   }
 
 bool Pose::hasLayerEvents(const Pose::Layer& l) {
@@ -694,8 +710,16 @@ uint64_t Pose::animationTotalTime() const {
   return ret;
   }
 
+uint64_t Pose::atkTotalTime() const {
+  uint16_t comboLen = combo.len();
+  uint64_t ret=0;
+  for(auto& i:lay)
+    ret = std::max(ret,uint64_t(i.seq->atkTotalTime(comboLen)));
+  return ret;
+  }
+
 const Animation::Sequence* Pose::continueCombo(const AnimationSolver &solver, const Animation::Sequence *sq,
-                                               uint64_t tickCount) {
+                                               BodyState bs, uint64_t tickCount) {
   if(sq==nullptr)
     return nullptr;
 
@@ -716,7 +740,7 @@ const Animation::Sequence* Pose::continueCombo(const AnimationSolver &solver, co
   size_t   id    = combo.len()*2;
 
   if(0==d.defWindow.size() || 0==d.defHitEnd.size()) {
-    if(!startAnim(solver,sq,prev->comb,prev->bs,Pose::NoHint,tickCount))
+    if(!startAnim(solver,sq,prev->comb,bs,Pose::NoHint,tickCount))
       return nullptr;
     combo = ComboState();
     return sq;
@@ -724,7 +748,7 @@ const Animation::Sequence* Pose::continueCombo(const AnimationSolver &solver, co
 
   if(sq->data->defHitEnd.size()==0) {
     // hit -> block
-    startAnim(solver,sq,prev->comb,prev->bs,Pose::Force,tickCount);
+    startAnim(solver,sq,prev->comb,bs,Pose::Force,tickCount);
     combo = ComboState();
     return sq;
     }
@@ -744,7 +768,7 @@ const Animation::Sequence* Pose::continueCombo(const AnimationSolver &solver, co
     return nullptr;
 
   if(prev->seq->name!=sq->name) {
-    startAnim(solver,sq,prev->comb,prev->bs,Pose::Force,tickCount);
+    startAnim(solver,sq,prev->comb,bs,Pose::Force,tickCount);
     combo = ComboState();
     return sq;
     }

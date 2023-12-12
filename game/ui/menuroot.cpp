@@ -10,10 +10,38 @@ using namespace Tempest;
 MenuRoot::MenuRoot(KeyCodec& keyCodec)
   :keyCodec(keyCodec) {
   setCursorShape(CursorShape::Hidden);
-  vm = Gothic::inst().createPhoenixVm("MENU.DAT");
+
+  Gothic::inst().onSettingsChanged.bind(this,&MenuRoot::initSettings);
+  initSettings();
   }
 
 MenuRoot::~MenuRoot() {
+  Gothic::inst().onSettingsChanged.ubind(this,&MenuRoot::initSettings);
+  }
+
+void MenuRoot::initSettings() {
+  const auto lang = Gothic::inst().settingsGetI("GAME", "language");
+  if(lang==vmLang && vm!=nullptr)
+    return;
+
+  // clear pointer to vm-objects
+  for(auto& i:menuStack)
+    i->resetVm(nullptr);
+  if(current!=nullptr)
+    current->resetVm(nullptr);
+
+  vmLang = lang;
+  vm     = Gothic::inst().createPhoenixVm("MENU.DAT", ScriptLang(vmLang));
+  vm->register_external("apply_options_video",[](){
+    Log::d("TODO: apply_options_video");
+    });
+
+  for(auto& i:menuStack)
+    i->resetVm(vm.get());
+  if(current!=nullptr)
+    current->resetVm(vm.get());
+
+  update();
   }
 
 void MenuRoot::setMainMenu() {
@@ -45,7 +73,7 @@ void MenuRoot::pushMenu(GameMenu *w) {
     addWidget(w);
     w->onTick();
     }
-  current=w;
+  current = w;
   }
 
 void MenuRoot::popMenu() {
@@ -102,7 +130,7 @@ void MenuRoot::mouseDownEvent(MouseEvent& event) {
     if(event.button==Event::ButtonRight) {
       popMenu();
       } else {
-      current->onSelect();
+      current->onKeyboard(KeyCodec::ActionGeneric);
       }
     } else {
     event.ignore();
@@ -115,9 +143,9 @@ void MenuRoot::mouseUpEvent(MouseEvent&) {
 void MenuRoot::mouseWheelEvent(MouseEvent &event) {
   if(current!=nullptr) {
     if(event.delta>0)
-      current->onMove(-1); else
+      current->onKeyboard(KeyCodec::Forward); else
     if(event.delta<0)
-      current->onMove(1);
+      current->onKeyboard(KeyCodec::Back);
     } else {
     event.ignore();
     }
@@ -150,15 +178,15 @@ void MenuRoot::keyDownEvent(KeyEvent &e) {
 void MenuRoot::keyUpEvent(KeyEvent &e) {
   if(current!=nullptr) {
     if(e.key==Event::K_W || e.key==Event::K_Up)
-      current->onMove(-1);
+      current->onKeyboard(KeyCodec::Forward);
     else if(e.key==Event::K_S || e.key==Event::K_Down)
-      current->onMove(1);
+      current->onKeyboard(KeyCodec::Back);
     else if(e.key==Event::K_A || e.key==Event::K_Left)
-      current->onSlide(-1);
+      current->onKeyboard(KeyCodec::Left);
     else if(e.key==Event::K_D || e.key==Event::K_Right)
-      current->onSlide(1);
+      current->onKeyboard(KeyCodec::Right);
     else if(e.key==Event::K_Return)
-      current->onSelect();
+      current->onKeyboard(KeyCodec::ActionGeneric);
     else if(e.key==Event::K_ESCAPE || keyCodec.tr(e)==current->keyClose())
       popMenu();
     }

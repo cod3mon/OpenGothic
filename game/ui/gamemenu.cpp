@@ -261,7 +261,7 @@ struct GameMenu::SavNameDialog : Dialog {
   };
 
 GameMenu::GameMenu(MenuRoot &owner, KeyCodec& keyCodec, phoenix::vm &vm, std::string_view menuSection, KeyCodec::Action kClose)
-  :owner(owner), keyCodec(keyCodec), vm(vm), kClose(kClose) {
+  :owner(owner), keyCodec(keyCodec), vm(&vm), kClose(kClose) {
   setCursorShape(CursorShape::Hidden);
   timer.timeout.bind(this,&GameMenu::onTick);
   timer.start(100);
@@ -269,7 +269,7 @@ GameMenu::GameMenu(MenuRoot &owner, KeyCodec& keyCodec, phoenix::vm &vm, std::st
   textBuf.reserve(64);
 
   auto* menuSectionSymbol = vm.find_symbol_by_name(menuSection);
-  if (menuSectionSymbol != nullptr) {
+  if(menuSectionSymbol!=nullptr) {
     menu = vm.init_instance<phoenix::c_menu>(menuSectionSymbol);
     } else {
     Tempest::Log::e("Cannot initialize menu ", menuSection, ": Symbol not found.");
@@ -292,12 +292,12 @@ GameMenu::GameMenu(MenuRoot &owner, KeyCodec& keyCodec, phoenix::vm &vm, std::st
     }
   setPosition(int(infoX*float(w())),int(infoY*float(h())));
 
-  setSelection(isInGameAndAlive() ? menu->default_ingame : menu->default_outgame);
+  setSelection(Gothic::inst().isInGameAndAlive() ? menu->default_ingame : menu->default_outgame);
   updateValues();
   slider = Resources::loadTexture("MENU_SLIDER_POS.TGA");
 
-  up   = Resources::loadTexture("O.TGA");
-  down = Resources::loadTexture("U.TGA");
+  up     = Resources::loadTexture("O.TGA");
+  down   = Resources::loadTexture("U.TGA");
 
   Gothic::inst().pushPause();
   }
@@ -306,6 +306,17 @@ GameMenu::~GameMenu() {
   Gothic::flushSettings();
   Gothic::inst().popPause();
   Resources::device().waitIdle(); // safe-delete savethumb
+  }
+
+void GameMenu::resetVm(phoenix::vm* inVm) {
+  vm = inVm;
+  for(int i=0; i<phoenix::c_menu::item_count; ++i){
+    hItems[i].handle = nullptr;
+    }
+  if(vm==nullptr)
+    return;
+  initItems();
+  updateValues();
   }
 
 GameMenu::QuestStat GameMenu::toStatus(std::string_view str) {
@@ -343,9 +354,9 @@ void GameMenu::initItems() {
 
     hItems[i].name = menu->items[i];
 
-    auto* menuItemSymbol = vm.find_symbol_by_name(hItems[i].name);
+    auto* menuItemSymbol = vm->find_symbol_by_name(hItems[i].name);
     if (menuItemSymbol != nullptr) {
-      hItems[i].handle = vm.init_instance<phoenix::c_menu_item>(menuItemSymbol);
+      hItems[i].handle = vm->init_instance<phoenix::c_menu_item>(menuItemSymbol);
       } else {
       Tempest::Log::e("Cannot initialize menu item ", hItems[i].name, ": Symbol not found.");
       hItems[i].handle = std::make_shared<phoenix::c_menu_item>();
@@ -363,6 +374,7 @@ void GameMenu::initItems() {
 void GameMenu::paintEvent(PaintEvent &e) {
   Painter p(e);
   p.setScissor(-x(),-y(),owner.w(),owner.h());
+
   if(back) {
     p.setBrush(*back);
     p.drawRect(0,0,w(),h(),
@@ -374,19 +386,22 @@ void GameMenu::paintEvent(PaintEvent &e) {
 
   if(menu->flags & phoenix::c_menu_flags::show_info) {
     if(auto sel=selectedItem()) {
-      auto& fnt  = Resources::font();
       auto& item = sel->handle;
       if(item->text->size()>0) {
-        std::string_view txt = item->text[1];
-        int tw = fnt.textSize(txt).w;
-        fnt.drawText(p,(w()-tw)/2,h()-7,txt);
+        auto             fnt   = Resources::font();
+        std::string_view txt   = item->text[1];
+        int              tw    = fnt.textSize(txt).w;
+        const float      scale = Gothic::options().interfaceScale;
+
+        fnt.drawText(p,(w()-tw)/2,h()-int(7*scale),txt);
         }
       }
     }
 
   if(owner.hasVersionLine()) {
-    auto& fnt = Resources::font();
-    fnt.drawText(p, w()-fnt.textSize(appBuild).w-25, h()-25, appBuild);
+    auto&       fnt   = Resources::font();
+    const float scale = Gothic::options().interfaceScale;
+    fnt.drawText(p, w()-fnt.textSize(appBuild).w-int(25*scale), h()-int(25*scale), appBuild);
     }
   }
 
@@ -403,10 +418,10 @@ void GameMenu::drawItem(Painter& p, Item& hItem) {
   const int32_t dimx = (item->dim_x!=-1) ? item->dim_x : 8192;
   const int32_t dimy = (item->dim_y!=-1) ? item->dim_y : 750;
 
-  const int x   = int(float(w()*item->pos_x)/scriptDiv);
-  const int y   = int(float(h()*item->pos_y)/scriptDiv);
-  int       szX = int(float(w()*dimx       )/scriptDiv);
-  int       szY = int(float(h()*dimy       )/scriptDiv);
+  const int   x     = int(float(w()*item->pos_x)/scriptDiv);
+  const int   y     = int(float(h()*item->pos_y)/scriptDiv);
+  int         szX   = int(float(w()*dimx       )/scriptDiv);
+  int         szY   = int(float(h()*dimy       )/scriptDiv);
 
   if(hItem.img && !hItem.img->isEmpty()) {
     p.setBrush(*hItem.img);
@@ -414,10 +429,9 @@ void GameMenu::drawItem(Painter& p, Item& hItem) {
                0,0,hItem.img->w(),hItem.img->h());
     }
 
-  auto& fnt = getTextFont(hItem);
-
-  int tw = szX;
-  int th = szY;
+  auto fnt = getTextFont(hItem);
+  int  tw  = szX;
+  int  th  = szY;
 
   AlignFlag txtAlign=NoAlign;
   if(flags & phoenix::c_menu_item_flags::centered) {
@@ -515,11 +529,11 @@ void GameMenu::drawSlider(Painter& p, Item& it, int x, int y, int sw, int sh) {
 
 void GameMenu::drawQuestList(Painter& p, Item& it, int x, int y, int w, int h,
                              const QuestLog& log, QuestStat st) {
-  int     itY        = y;
-  int32_t listId     = -1;
-  int32_t listLen    = numQuests(&log,st);
-  int32_t listBegin  = it.scroll;
-  int32_t listEnd    = listLen;
+  int     itY       = y;
+  int32_t listId    = -1;
+  int32_t listLen   = numQuests(&log,st);
+  int32_t listBegin = it.scroll;
+  int32_t listEnd   = listLen;
 
   for(size_t i=0; i<log.questCount(); i++) {
     auto& quest = log.quest(log.questCount()-i-1);
@@ -534,7 +548,7 @@ void GameMenu::drawQuestList(Painter& p, Item& it, int x, int y, int w, int h,
       ft = Resources::FontType::Hi;
 
     auto& fnt = Resources::font(it.handle->fontname,ft);
-    auto  sz  = fnt.textSize(w,quest.name);
+    auto sz  = fnt.textSize(w,quest.name);
     if(itY+sz.h>h+y) {
       listEnd = listId;
       break;
@@ -569,24 +583,32 @@ void GameMenu::resizeEvent(SizeEvent &) {
   onTick();
   }
 
-void GameMenu::onMove(int dy) {
-  Gothic::inst().emitGlobalSound(Gothic::inst().loadSoundFx("MENU_BROWSE"));
-  setSelection(int(curItem)+dy, dy>0 ? 1 : -1);
-  if(auto s = selectedItem())
-    updateSavThumb(*s);
-  update();
-  }
+void GameMenu::onKeyboard(KeyCodec::Action key) {
+  auto sel = selectedItem();
+  if(sel!=nullptr && isHorSelectable(sel->handle)) {
+    if(key==KeyCodec::Left)
+      key = KeyCodec::Forward;
+    else if(key==KeyCodec::Right)
+      key = KeyCodec::Back;
+    }
 
-void GameMenu::onSelect() {
-  if(auto sel=selectedItem()){
+  if(key==KeyCodec::Forward || key==KeyCodec::Back) {
+    Gothic::inst().emitGlobalSound(Gothic::inst().loadSoundFx("MENU_BROWSE"));
+    const int dy = (key==KeyCodec::Forward) ? -1 : +1;
+    setSelection(int(curItem)+dy, dy);
+    if(auto s = selectedItem())
+      updateSavThumb(*s);
+    update();
+    }
+
+  if((key==KeyCodec::Left || key==KeyCodec::Right) && sel!=nullptr) {
+    const int dx = (key==KeyCodec::Left) ? -1 : +1;
+    exec(*sel, dx);
+    }
+
+  if(key==KeyCodec::ActionGeneric && sel!=nullptr) {
     Gothic::inst().emitGlobalSound(Gothic::inst().loadSoundFx("MENU_SELECT"));
     exec(*sel,0);
-    }
-  }
-
-void GameMenu::onSlide(int dx) {
-  if(auto sel=selectedItem()){
-    exec(*sel,dx);
     }
   }
 
@@ -599,9 +621,14 @@ void GameMenu::onTick() {
   const float wx = float(owner.w());
   const float wy = float(owner.h());
 
-  if(menu->flags & phoenix::c_menu_flags::dont_scale_dimension)
-    resize(int(float(menu->dim_x)/scriptDiv*fx),int(float(menu->dim_y)/scriptDiv*fy)); else
-    resize(int(float(menu->dim_x)/scriptDiv*wx),int(float(menu->dim_y)/scriptDiv*wy));
+  const float scale = Gothic::options().interfaceScale;
+  Size size = {0, 0};
+  if(menu->flags & phoenix::c_menu_flags::dont_scale_dimension) {
+    size = {int(float(menu->dim_x)*fx*scale/scriptDiv),int(float(menu->dim_y)*fy*scale/scriptDiv)};
+    } else {
+    size = {int(float(menu->dim_x)*wx*scale/scriptDiv),int(float(menu->dim_y)*wy*scale/scriptDiv)};
+    }
+  resize(size);
 
   if(menu->flags & phoenix::c_menu_flags::align_center) {
     setPosition((owner.w()-w())/2, (owner.h()-h())/2);
@@ -694,6 +721,7 @@ void GameMenu::getText(const Item& it, std::vector<char> &out) {
   }
 
 const GthFont& GameMenu::getTextFont(const GameMenu::Item &it) {
+  GthFont ret;
   if(!isEnabled(it.handle))
     return Resources::font(it.handle->fontname,Resources::FontType::Disabled);
   if(&it==selectedItem())
@@ -705,12 +733,16 @@ bool GameMenu::isSelectable(const std::shared_ptr<phoenix::c_menu_item>& item) {
   return item != nullptr && (item->flags & phoenix::c_menu_item_flags::selectable) && !isHidden(item);
   }
 
+bool GameMenu::isHorSelectable(const std::shared_ptr<phoenix::c_menu_item>& item) {
+  return item != nullptr && (item->flags & phoenix::c_menu_item_flags::hor_selectable) && !isHidden(item);
+  }
+
 bool GameMenu::isEnabled(const std::shared_ptr<phoenix::c_menu_item>& item) {
   if(item==nullptr)
     return false;
-  if((item->flags & phoenix::c_menu_item_flags::only_ingame) && !isInGameAndAlive())
+  if((item->flags & phoenix::c_menu_item_flags::only_ingame) && !Gothic::inst().isInGameAndAlive())
     return false;
-  if((item->flags & phoenix::c_menu_item_flags::only_outgame) && isInGameAndAlive())
+  if((item->flags & phoenix::c_menu_item_flags::only_outgame) && Gothic::inst().isInGameAndAlive())
     return false;
   return true;
   }
@@ -795,8 +827,8 @@ void GameMenu::execSingle(Item &it, int slideDx) {
         exitFlag = true;
         break;
       case c_menu_item_select_action::start_menu:
-        if(vm.find_symbol_by_name(onSelAction_S[i]) != nullptr)
-          owner.pushMenu(new GameMenu(owner,keyCodec,vm,onSelAction_S[i],keyClose()));
+        if(vm->find_symbol_by_name(onSelAction_S[i]) != nullptr)
+          owner.pushMenu(new GameMenu(owner,keyCodec,*vm,onSelAction_S[i],keyClose()));
         break;
       case c_menu_item_select_action::start_item:
         break;
@@ -825,9 +857,9 @@ void GameMenu::execSingle(Item &it, int slideDx) {
     }
 
   if(onEventAction[int(c_menu_item_select_event::execute)]>0){
-    auto* sym = vm.find_symbol_by_index(uint32_t(onEventAction[int(c_menu_item_select_event::execute)]));
+    auto* sym = vm->find_symbol_by_index(uint32_t(onEventAction[int(c_menu_item_select_event::execute)]));
     if (sym != nullptr)
-      vm.call_function(sym);
+      vm->call_function(sym);
     }
 
   execChgOption(it,slideDx);
@@ -845,14 +877,16 @@ void GameMenu::execChgOption(Item &item, int slideDx) {
     v  = std::max(0.f,std::min(v+float(slideDx)*0.03f,1.f));
     Gothic::settingsSetF(sec, opt, v);
     }
-  if(item.handle->type==phoenix::c_menu_item_type::choicebox && slideDx==0) {
+  if(item.handle->type==phoenix::c_menu_item_type::choicebox) {
     updateItem(item);
-    item.value += 1; // next value
+    const int cnt = int(strEnumSize(item.handle->text[0]));
+    if(slideDx==0 && cnt==2)
+      slideDx = 1; // QoL: on/off toggle
 
-    int cnt = int(strEnumSize(item.handle->text[0]));
+    item.value += slideDx; // next value
     if(cnt>0)
-      item.value%=cnt; else
-      item.value =0;
+      item.value = (item.value+cnt) % cnt; else
+      item.value = 0;
     Gothic::settingsSetI(sec, opt, item.value);
     }
   }
@@ -949,6 +983,8 @@ void GameMenu::updateSavTitle(GameMenu::Item& sel) {
     sel.savHdr         = std::move(hdr);
 
     if(reader.setEntry("priview.png"))
+      reader.read(sel.savPriview); // legacy
+    else if(reader.setEntry("preview.png"))
       reader.read(sel.savPriview);
     }
   catch(std::bad_alloc&) {
@@ -979,18 +1015,11 @@ void GameMenu::updateSavThumb(GameMenu::Item &sel) {
 
 void GameMenu::updateVideo() {
   set("MENUITEM_VID_DEVICE_CHOICE",     Resources::renderer());
-  set("MENUITEM_VID_RESOLUTION_CHOICE", "");
+  set("MENUITEM_VID_RESOLUTION_CHOICE", "full|75%|half");
   }
 
 void GameMenu::setDefaultKeys(std::string_view preset) {
   keyCodec.setDefaultKeys(preset);
-  }
-
-bool GameMenu::isInGameAndAlive() {
-  auto pl = Gothic::inst().player();
-  if(pl==nullptr || pl->isDead())
-    return false;
-  return Gothic::inst().isInGame();
   }
 
 bool GameMenu::implUpdateSavThumb(GameMenu::Item& sel) {
@@ -1053,7 +1082,7 @@ std::string_view GameMenu::strEnum(std::string_view en, int id, std::vector<char
       break;
       }
 
-  for(;en[i];++i){
+  for(;i<en.size();++i){
     size_t b=i;
     for(size_t r=i; r<en.size(); ++r,++i)
       if(en[r]=='|')
@@ -1089,7 +1118,7 @@ size_t GameMenu::strEnumSize(std::string_view en) {
     if(en[i]=='#' || en[i]=='|') {
       cnt += en[i]=='|' ? 2 : 1;
       i++;
-      for(;en[i];++i) {
+      for(;i<en.size();++i) {
         if(en[i]=='|')
           cnt++;
         }

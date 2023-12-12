@@ -161,7 +161,8 @@ void WorldObjects::tick(uint64_t dt, uint64_t dtPlayer) {
       });
     }
 
-  const bool freeCam = (Gothic::inst().camera()!=nullptr && Gothic::inst().camera()->isFree());
+  auto       camera  = Gothic::inst().camera();
+  const bool freeCam = (camera!=nullptr && camera->isFree());
   const auto pl      = owner.player();
   for(size_t i=0; i<npcArr.size(); ++i) {
     auto& npc = *npcArr[i];
@@ -262,7 +263,7 @@ void WorldObjects::tick(uint64_t dt, uint64_t dtPlayer) {
         if(i.canSenseNpc(*r.other, true)==SensesBit::SENSE_NONE)
           continue;
 
-        // aproximation of behavior of original G2
+        // approximation of behavior of original G2
         if(r.victum!=nullptr && i.canSenseNpc(*r.victum,true,float(r.other->handle().senses_range))==SensesBit::SENSE_NONE)
           continue;
 
@@ -423,6 +424,8 @@ void WorldObjects::updateAnimation(uint64_t dt) {
   static bool doAnim=true;
   if(!doAnim)
     return;
+  if(dt==0)
+    return;
   Workers::parallelTasks(npcArr,[dt](std::unique_ptr<Npc>& i){
     i->updateAnimation(dt);
     });
@@ -522,6 +525,14 @@ void WorldObjects::disableTicks(AbstractTrigger& t) {
       triggersTk.pop_back();
       return;
       }
+  }
+
+void WorldObjects::setCurrentCs(CsCamera* cs) {
+  currentCsCamera = cs;
+  }
+
+CsCamera* WorldObjects::currentCs() const {
+  return currentCsCamera;
   }
 
 void WorldObjects::enableCollizionZone(CollisionZone& z) {
@@ -739,7 +750,7 @@ Npc* WorldObjects::findNpcNear(const Npc& pl, Npc* def, const SearchOpt& opt) {
       return def;
     }
   auto r = findObj(npcNear,pl,opt);
-  if(r!=nullptr && (!Gothic::inst().doHideFocus() || !r->isDead() ||
+  if(r!=nullptr && (!Gothic::inst().options().hideFocus || !r->isDead() ||
                        r->inventory().iterator(Inventory::T_Ransack).isValid()))
     return r;
   return nullptr;

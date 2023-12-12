@@ -3,7 +3,6 @@
 #include <Tempest/Log>
 
 #include "graphics/mesh/submesh/animmesh.h"
-#include "gothic.h"
 
 using namespace Tempest;
 
@@ -53,7 +52,7 @@ ObjectsBucket::Item VisualObjects::get(const StaticMesh& mesh, const Material& m
 
 ObjectsBucket::Item VisualObjects::get(const AnimMesh &mesh, const Material& mat,
                                        size_t iboOff, size_t iboLen,
-                                       const MatrixStorage::Id& anim) {
+                                       const InstanceStorage::Id& anim) {
   if(mat.tex==nullptr) {
     Tempest::Log::e("no texture?!");
     return ObjectsBucket::Item();
@@ -73,28 +72,27 @@ ObjectsBucket::Item VisualObjects::get(const Material& mat) {
   return ObjectsBucket::Item(bucket,id);
   }
 
-MatrixStorage::Id VisualObjects::getMatrixes(BufferHeap heap, size_t boneCnt) {
-  return matrix.alloc(heap, boneCnt);
+InstanceStorage::Id VisualObjects::alloc(size_t size) {
+  return instanceMem.alloc(size);
   }
 
-const Tempest::StorageBuffer& VisualObjects::matrixSsbo(Tempest::BufferHeap heap, uint8_t fId) const {
-  return matrix.ssbo(heap, fId);
+bool VisualObjects::realloc(InstanceStorage::Id& id, size_t size) {
+  return instanceMem.realloc(id, size);
   }
 
-void VisualObjects::setupUbo() {
+const Tempest::StorageBuffer& VisualObjects::instanceSsbo() const {
+  return instanceMem.ssbo();
+  }
+
+void VisualObjects::prepareUniforms() {
   for(auto& c:buckets)
-    c->setupUbo();
+    c->prepareUniforms();
   }
 
 void VisualObjects::preFrameUpdate(uint8_t fId) {
-  recycledId = fId;
-  recycled[fId].clear();
-
-  //mkTlas(fId);
   mkIndex();
   for(auto& c:buckets)
     c->preFrameUpdate(fId);
-  commitUbo(fId);
   }
 
 void VisualObjects::visibilityPass(const Frustrum fr[]) {
@@ -147,19 +145,8 @@ void VisualObjects::resetIndex() {
   index.clear();
   }
 
-void VisualObjects::resetTlas() {
-  needtoInvalidateTlas = true;
-  }
-
-void VisualObjects::recycle(Tempest::DescriptorSet&& del) {
-  if(del.isEmpty())
-    return;
-  recycled[recycledId].emplace_back(std::move(del));
-  }
-
-void VisualObjects::setLandscapeBlas(const Tempest::AccelerationStructure* blas) {
-  landBlas             = blas;
-  needtoInvalidateTlas = true;
+void VisualObjects::notifyTlas(const Material& m, RtScene::Category cat) {
+  globals.rtScene.notifyTlas(m,cat);
   }
 
 void VisualObjects::mkIndex() {
@@ -185,23 +172,18 @@ void VisualObjects::mkIndex() {
     if(lm.alphaOrder()>rm.alphaOrder())
       return false;
 
-    const int lt = l->type()==ObjectsBucket::Landscape ? 0 : 1;
-    const int rt = r->type()==ObjectsBucket::Landscape ? 0 : 1;
+    const int lt    = l->type()==ObjectsBucket::Landscape ? 0 : 1;
+    const int rt    = r->type()==ObjectsBucket::Landscape ? 0 : 1;
 
-    if(lt<rt)
-      return true;
-    if(lt>rt)
-      return false;
+    const bool lpso = l->pso();
+    const bool rpso = r->pso();
 
-    auto lv = l->meshPointer();
-    auto rv = r->meshPointer();
-    if(lv<rv)
-      return true;
-    if(lv>rv)
-      return false;
+    const auto lv   = l->meshPointer();
+    const auto rv   = r->meshPointer();
 
-    return lm.tex < rm.tex;
+    return std::tie(lt, lpso, lv, lm.tex) < std::tie(rt, rpso, rv, rm.tex);
     });
+
   lastSolidBucket = index.size();
   for(size_t i=0;i<index.size();++i) {
     auto c = index[i];
@@ -231,45 +213,25 @@ void VisualObjects::mkIndex() {
   */
   }
 
-void VisualObjects::commitUbo(uint8_t fId) {
-  bool sk = matrix.commit(fId);
+void VisualObjects::prepareGlobals(Encoder<CommandBuffer>& cmd, uint8_t fId) {
+  bool sk = instanceMem.commit(cmd, fId);
   if(!sk)
     return;
   for(auto& c:buckets)
     c->invalidateUbo(fId);
   }
 
-void VisualObjects::updateTlas(Bindless& out, uint8_t fId) {
-  if(!needtoInvalidateTlas || !globals.tlasEnabled)
-    return;
-  needtoInvalidateTlas = false;
+void VisualObjects::postFrameupdate() {
+  instanceMem.join();
+  }
 
-  if(!Gothic::inst().doRayQuery())
-    return;
+bool VisualObjects::updateRtScene(RtScene& out) {
+  if(!out.isUpdateRequired())
+    return false;
 
-  std::vector<Tempest::RtInstance> inst;
-  std::vector<uint32_t>            iboOff;
-  out.tex.clear();
-  out.vbo.clear();
-  out.ibo.clear();
-  if(landBlas!=nullptr) {
-    Tempest::RtInstance ix;
-    ix.mat  = Matrix4x4::mkIdentity();
-    ix.blas = landBlas;
-    inst.push_back(ix);
-    out.tex.push_back(&Resources::fallbackBlack());
-    out.vbo.push_back(nullptr);
-    out.ibo.push_back(nullptr);
-    iboOff.push_back(0);
-    }
   for(auto& c:buckets)
-    c->fillTlas(inst,iboOff,out);
+    c->fillTlas(out);
 
-  auto& device = Resources::device();
-  device.waitIdle();
-
-  out.iboOffset = device.ssbo(iboOff);
-  tlas = device.tlas(inst);
-
-  onTlasChanged(&tlas);
+  out.buildTlas();
+  return true;
   }

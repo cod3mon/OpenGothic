@@ -19,19 +19,21 @@ class Shaders {
     Tempest::RenderPipeline  shadowResolve, shadowResolveSh, shadowResolveRq;
 
     Tempest::ComputePipeline copyBuf;
+    Tempest::ComputePipeline copyImg;
+    Tempest::ComputePipeline path;
     Tempest::RenderPipeline  copy;
     Tempest::RenderPipeline  stash;
 
     Tempest::RenderPipeline  ambientCompose, ambientComposeSsao;
-    Tempest::ComputePipeline ssao;
+    Tempest::ComputePipeline ssao, ssaoBlur;
 
     Tempest::ComputePipeline irradiance;
 
     // Scalable and Production Ready Sky and Atmosphere
     Tempest::RenderPipeline  skyTransmittance, skyMultiScattering;
-    Tempest::RenderPipeline  skyViewLut, sky;
+    Tempest::RenderPipeline  skyViewLut, skyViewCldLut, sky;
     Tempest::RenderPipeline  fog;
-    Tempest::RenderPipeline  fogViewLut, fog3dLQ, fog3dHQ;
+    Tempest::RenderPipeline  fog3dLQ, fog3dHQ;
     Tempest::RenderPipeline  sun;
     Tempest::ComputePipeline cloudsLut, fogOcclusion;
     Tempest::ComputePipeline fogViewLut3dLQ, fogViewLut3dHQ, shadowDownsample;
@@ -41,8 +43,16 @@ class Shaders {
 
     Tempest::RenderPipeline  tonemapping;
 
-    // Compute
-    Tempest::ComputePipeline hiZRaw, hiZPot, hiZMip;
+    // HiZ
+    Tempest::ComputePipeline hiZPot, hiZMip;
+    Tempest::RenderPipeline  hiZReproj;
+
+    // GI
+    Tempest::RenderPipeline  probeDbg;
+    Tempest::ComputePipeline probeInit, probeClear, probeClearHash, probeMakeHash;
+    Tempest::ComputePipeline probeVote, probePrune, probeAlocation;
+    Tempest::ComputePipeline probeTrace, probeLighting;
+    Tempest::RenderPipeline  probeDraw;
 
     enum PipelineType: uint8_t {
       T_Forward,
@@ -86,7 +96,7 @@ class Shaders {
 
     static Shaders* instance;
 
-    MaterialTemplate solid,  atest, solidF, atestF, water, ghost, emmision, multiply;
+    MaterialTemplate solid,  atest, solidF, atestF, water, waterTess, ghost, emmision, multiply;
     MaterialTemplate shadow, shadowAt;
     mutable std::list<Entry> materials;
   };

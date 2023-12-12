@@ -2,17 +2,9 @@
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_GOOGLE_include_directive : enable
 
-#if defined(RAY_QUERY)
-#extension GL_EXT_ray_query : enable
-#endif
-
-#if defined(RAY_QUERY_AT)
-#extension GL_EXT_nonuniform_qualifier : enable
-#extension GL_EXT_ray_flags_primitive_culling : enable
-#endif
-
 #define LWC 1
 
+#include "lighting/rt/rt_common.glsl"
 #include "lighting/tonemapping.glsl"
 #include "lighting/shadow_sampling.glsl"
 #include "lighting/purkinje_shift.glsl"
@@ -25,61 +17,13 @@ layout(binding = 0, std140) uniform UboScene {
   SceneDesc scene;
   };
 
-layout(binding = 1) uniform sampler2D diffuse;
-layout(binding = 2) uniform sampler2D normals;
-layout(binding = 3) uniform sampler2D depth;
+layout(binding = 1) uniform sampler2D  gbufDiffuse;
+layout(binding = 2) uniform usampler2D gbufNormal;
+layout(binding = 3) uniform sampler2D  depth;
 
 #if defined(SHADOW_MAP)
 layout(binding = 4) uniform sampler2D textureSm0;
 layout(binding = 5) uniform sampler2D textureSm1;
-#endif
-
-#if defined(RAY_QUERY)
-layout(binding = 6) uniform accelerationStructureEXT topLevelAS;
-#endif
-
-#if defined(RAY_QUERY_AT)
-layout(binding  = 7) uniform sampler   smp;
-layout(binding  = 8) uniform texture2D textures[];
-layout(binding  = 9,  std430) readonly buffer Vbo { float vert[];   } vbo[];
-layout(binding  = 10, std430) readonly buffer Ibo { uint  index[];  } ibo[];
-layout(binding  = 11, std430) readonly buffer Off { uint  offset[]; } iboOff;
-
-vec2 pullTexcoord(uint id, uint vboOffset) {
-  float u = vbo[nonuniformEXT(id)].vert[vboOffset*9 + 6];
-  float v = vbo[nonuniformEXT(id)].vert[vboOffset*9 + 7];
-  return vec2(u,v);
-  }
-
-uvec3 pullTrinagleIds(uint id, uint primitiveID) {
-  uvec3 index;
-  index.x = ibo[nonuniformEXT(id)].index[primitiveID*3+0];
-  index.y = ibo[nonuniformEXT(id)].index[primitiveID*3+1];
-  index.z = ibo[nonuniformEXT(id)].index[primitiveID*3+2];
-  return index;
-  }
-
-bool alphaTest(in rayQueryEXT rayQuery, uint id) {
-  const bool commited   = false;
-
-  if(id==0)
-    return true; // landscape
-
-  const uint  primOffset  = iboOff.offset[id];
-  const uint  primitiveID = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, commited) + primOffset;
-  const uvec3 index       = pullTrinagleIds(id,primitiveID);
-
-  const vec2  uv0         = pullTexcoord(id,index.x);
-  const vec2  uv1         = pullTexcoord(id,index.y);
-  const vec2  uv2         = pullTexcoord(id,index.z);
-
-  vec3 b = vec3(0,rayQueryGetIntersectionBarycentricsEXT(rayQuery,commited));
-  b.x = (1-b.y-b.z);
-  vec2 uv = (b.x*uv0 + b.y*uv1 + b.z*uv2);
-
-  vec4 d = textureLod(sampler2D(textures[nonuniformEXT(id)], smp),uv,0);
-  return (d.a>0.5);
-  }
 #endif
 
 float lambert(vec3 normal) {
@@ -113,7 +57,7 @@ float calcShadow(vec4 pos4, float bias) { return 1.0; }
 #if defined(RAY_QUERY)
 bool rayTest(vec3 pos, vec3  rayDirection, float tMin, float tMax, out float rayT) {
 #if defined(RAY_QUERY_AT)
-  uint flags = gl_RayFlagsCullFrontFacingTrianglesEXT;
+  uint flags = gl_RayFlagsCullBackFacingTrianglesEXT;
 #else
   uint flags = gl_RayFlagsOpaqueEXT;
 #endif
@@ -121,19 +65,7 @@ bool rayTest(vec3 pos, vec3  rayDirection, float tMin, float tMax, out float ray
   rayQueryEXT rayQuery;
   rayQueryInitializeEXT(rayQuery, topLevelAS, flags, 0xFF,
                         pos, tMin, rayDirection, tMax);
-
-  while(rayQueryProceedEXT(rayQuery)) {
-#if defined(RAY_QUERY_AT)
-    const uint type = rayQueryGetIntersectionTypeEXT(rayQuery,false);
-    const uint id   = rayQueryGetIntersectionInstanceCustomIndexEXT(rayQuery,false);
-    if(type==gl_RayQueryCandidateIntersectionTriangleEXT) {
-      const bool opaqueHit = alphaTest(rayQuery,id);
-      if(opaqueHit)
-        rayQueryConfirmIntersectionEXT(rayQuery);
-      }
-#endif
-    }
-
+  rayQueryProceedShadow(rayQuery);
   if(rayQueryGetIntersectionTypeEXT(rayQuery, true)==gl_RayQueryCommittedIntersectionNoneEXT)
     return false;
   rayT = rayQueryGetIntersectionTEXT(rayQuery, true);
@@ -147,7 +79,7 @@ bool rayTest(vec3 pos, float tMin, float tMax) {
 
 float calcRayShadow(vec4 pos4, vec3 normal, float depth) {
   vec4 sp = scene.viewShadow[1]*pos4;
-  if(all(lessThan(abs(sp.xy)+0.001,vec2(abs(sp.w)))))
+  if(all(lessThan(abs(sp.xy/sp.w), vec2(0.999))))
     return 1.0;
 
   // NOTE: shadow is still leaking! Need to develop pso.depthClampEnable to fix it.
@@ -185,9 +117,8 @@ void main(void) {
     return;
     }
 
-  const vec4  diff   = texelFetch(diffuse, fragCoord, 0);
-  const vec4  nrm    = texelFetch(normals, fragCoord, 0);
-  const vec3  normal = normalize(nrm.xyz*2.0-vec3(1.0));
+  const vec4  diff   = texelFetch(gbufDiffuse, fragCoord, 0);
+  const vec3  normal = normalFetch(gbufNormal, fragCoord);
 
   bool isFlat  = false;
   bool isATest = false;
@@ -230,11 +161,12 @@ void main(void) {
   */
 #endif
 
-  const vec3 lcolor = scene.sunCl.rgb * scene.GSunIntensity * light * shadow;
-  const vec3 linear = textureLinear(diff.rgb) * PhotoLumInv;
+  const vec3 lcolor = scene.sunCl.rgb * scene.GSunIntensity * Fd_Lambert * light * shadow;
+  const vec3 linear = textureLinear(diff.rgb);
 
   vec3 color = linear*lcolor*scene.exposure;
-  outColor = vec4(color, 1.0);
+  color *= (1.0/M_PI); // magic constant, non motivated by physics
+  outColor = vec4(color, 0.0);
 
   // outColor = vec4(vec3(lcolor), diff.a); // debug
   // if(diff.a>0)

@@ -40,11 +40,24 @@ if(WIN32)
   else()
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -mwindows -lstdc++fs")
   endif()
+elseif(IOS)
+  enable_language(OBJCXX)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET 15.0)
+  set_directory_properties("${CMAKE_SOURCE_DIR}" PROPERTIES
+    PROPERTY XCODE_STARTUP_PROJECT "${PROJECT_NAME}")
+  set_target_properties(${PROJECT_NAME} PROPERTIES
+    MACOSX_BUNDLE_INFO_PLIST "Info.plist.in"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "opengothic.gothic2"
+    MACOSX_BUNDLE_BUNDLE_VERSION 1
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+    XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer")
+elseif(APPLE)
+  enable_language(OBJCXX)
 endif()
 
-if(APPLE)
-  set(CMAKE_OSX_DEPLOYMENT_TARGET 12.0)
-  enable_language(OBJCXX)
+if(IOS)
+  file(GLOB_RECURSE ObjCSOURCES "game/*.mm")
+elseif(APPLE)
   target_link_libraries(${PROJECT_NAME} "-framework AppKit")
   file(GLOB_RECURSE ObjCSOURCES "game/*.mm")
 endif()

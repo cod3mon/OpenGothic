@@ -13,6 +13,7 @@
 #include <map>
 
 #include "graphics/material.h"
+#include "phoenix/Vfs.hh"
 #include "sound/soundfx.h"
 
 class StaticMesh;
@@ -48,7 +49,7 @@ class Resources final {
       };
 
     static const size_t MAX_NUM_SKELETAL_NODES = 96;
-    static const size_t MAX_MORPH_LAYERS       = 3;
+    static const size_t MAX_MORPH_LAYERS       = 4;
 
     struct Vertex {
       float    pos[3];
@@ -116,7 +117,8 @@ class Resources final {
     template<class V>
     static Tempest::IndexBuffer<V>   ibo(const V* data,size_t sz){ return inst->dev.ibo(data,sz); }
 
-    static Tempest::StorageBuffer    ssbo(const void* data, size_t size) { return inst->dev.ssbo(data,size); }
+    static Tempest::StorageBuffer    ssbo(const void* data, size_t size)         { return inst->dev.ssbo(data,size); }
+    static Tempest::StorageBuffer    ssbo(Tempest::Uninitialized_t, size_t size) { return inst->dev.ssbo(Tempest::Uninitialized,size); }
 
     template<class V, class I>
     static Tempest::AccelerationStructure
@@ -128,12 +130,16 @@ class Resources final {
       return inst->dev.blas(b,i,offset,size);
       }
 
+    static void resetRecycled(uint8_t fId);
+    static void recycle(Tempest::DescriptorSet&& ds);
+    static void recycle(Tempest::StorageBuffer&& ssbo);
+
     static std::vector<uint8_t>      getFileData(std::string_view name);
     static bool                      getFileData(std::string_view name, std::vector<uint8_t>& dat);
     static phoenix::buffer           getFileBuffer(std::string_view name);
     static bool                      hasFile    (std::string_view fname);
 
-    static const phoenix::vdf_file&  vdfsIndex();
+    static const phoenix::Vfs&       vdfsIndex();
 
     static const Tempest::VertexBuffer<VertexFsq>& fsqVbo();
 
@@ -210,10 +216,17 @@ class Resources final {
 
     std::recursive_mutex              sync;
     std::unique_ptr<Dx8::DirectMusic> dxMusic;
-    phoenix::vdf_file                 gothicAssets {"Root"};
+    phoenix::Vfs                      gothicAssets;
 
     std::vector<uint8_t>              fBuff, ddsBuf;
     Tempest::VertexBuffer<VertexFsq>  fsq;
+
+    struct DeleteQueue {
+      std::vector<Tempest::DescriptorSet> ds;
+      std::vector<Tempest::StorageBuffer> ssbo;
+      };
+    DeleteQueue recycled[MaxFramesInFlight];
+    uint8_t     recycledId = 0;
 
     TextureCache                                                      texCache;
     std::map<Tempest::Color,std::unique_ptr<Tempest::Texture2d>,Less> pixCache;

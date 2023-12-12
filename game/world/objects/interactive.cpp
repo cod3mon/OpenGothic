@@ -156,7 +156,7 @@ void Interactive::save(Serialize &fout) const {
 
   fout.write(uint32_t(attPos.size()));
   for(auto& i:attPos) {
-    fout.write(i.name,i.user,i.attachMode,i.started);
+    fout.write(i.name,i.user,i.attachMode,uint8_t(i.started));
     }
 
   if(!invent.isEmpty()) {
@@ -330,7 +330,7 @@ void Interactive::implTick(Pos& p) {
       }
     }
 
-  if((state==0 && !attach) || (isLadder() && (attach && state>=stepsCount-1))) {
+  if((state<=0 && !attach) || (isLadder() && (attach && state>=stepsCount-1))) {
     implQuitInteract(p);
     return;
     }
@@ -449,6 +449,7 @@ void Interactive::invokeStateFunc(Npc& npc) {
   if(loopState)
     return;
 
+  // TODO: hero only?
   string_frm func(onStateFunc,"_S",state);
   auto& sc = npc.world().script();
   sc.useInteractive(npc.handlePtr(), func);
@@ -937,9 +938,9 @@ bool Interactive::setAnim(Npc* npc, Anim dir) {
 
   uint64_t aniT = sqNpc==nullptr ? 0 : uint64_t(sqNpc->totalTime());
   if(aniT==0) {
-    /* Note: testing shows that in vanilla only npc animation maters.
+    /* Note: testing shows that in vanilla only npc animation matters.
      * testcase: chest animation
-     * modsi timings only here for completness
+     * modsi timings only here for completeness
      */
     aniT = sqMob==nullptr ? 0 : uint64_t(sqMob->totalTime());
     }

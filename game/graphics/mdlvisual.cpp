@@ -1,7 +1,5 @@
 #include "mdlvisual.h"
-#include "objvisual.h"
 
-#include "graphics/pfx/particlefx.h"
 #include "graphics/mesh/skeleton.h"
 #include "game/serialize.h"
 #include "utils/string_frm.h"
@@ -9,6 +7,7 @@
 #include "world/objects/interactive.h"
 #include "world/objects/item.h"
 #include "world/world.h"
+#include "objvisual.h"
 #include "gothic.h"
 
 using namespace Tempest;
@@ -170,6 +169,10 @@ void MdlVisual::setRangeWeapon(MeshObjects::Mesh &&b) {
   bind(bow,std::move(b),"ZS_BOW");
   }
 
+void MdlVisual::setShield(MeshObjects::Mesh&& s) {
+  bind(shield,std::move(s),"ZS_SHIELD");
+  }
+
 void MdlVisual::setAmmoItem(MeshObjects::Mesh&& a, std::string_view bone) {
   bind(ammunition,std::move(a),bone);
   }
@@ -177,6 +180,7 @@ void MdlVisual::setAmmoItem(MeshObjects::Mesh&& a, std::string_view bone) {
 void MdlVisual::setMagicWeapon(Effect&& spell, World& owner) {
   auto n = std::move(pfx.view);
   n.setLooped(false);
+  n.setActive(false);
   startEffect(owner,std::move(n),0,true);
 
   pfx.view = std::move(spell);
@@ -281,7 +285,7 @@ void MdlVisual::dropWeapon(Npc& npc) {
 
   Item* itm = nullptr;
   if(fgtMode==WeaponState::W1H || fgtMode==WeaponState::W2H)
-    itm = npc.currentMeleWeapon(); else
+    itm = npc.currentMeleeWeapon(); else
     itm = npc.currentRangeWeapon();
 
   if(itm==nullptr)
@@ -424,7 +428,7 @@ Vec2 MdlVisual::headRotation() const {
 void MdlVisual::updateWeaponSkeleton(const Item* weapon, const Item* range) {
   auto st = fgtMode;
   if(st==WeaponState::W1H || st==WeaponState::W2H){
-    bind(sword,"ZS_RIGHTHAND");
+    bind(sword, "ZS_RIGHTHAND");
     } else {
     bool twoHands = weapon!=nullptr && weapon->is2H();
     bind(sword,twoHands ? "ZS_LONGSWORD" : "ZS_SWORD");
@@ -438,6 +442,8 @@ void MdlVisual::updateWeaponSkeleton(const Item* weapon, const Item* range) {
     bool cbow  = range!=nullptr && range->isCrossbow();
     bind(bow,cbow ? "ZS_CROSSBOW" : "ZS_BOW");
     }
+
+  bind(shield, st==WeaponState::W1H ? "ZS_LEFTARM" : "ZS_SHIELD");
 
   pfx.view.setActive(st==WeaponState::Mage);
   syncAttaches();
@@ -630,11 +636,14 @@ const Animation::Sequence* MdlVisual::startAnimAndGet(Npc& npc, AnimationSolver:
     case AnimationSolver::Anim::Move:
     case AnimationSolver::Anim::MoveL:
     case AnimationSolver::Anim::MoveR:
-    case AnimationSolver::Anim::MoveBack:
       if(bool(wlk & WalkBit::WM_Walk))
         bs = BS_WALK; else
         bs = BS_RUN;
       break;
+    case AnimationSolver::Anim::MoveBack:
+      if(st!=WeaponState::NoWeapon)
+        bs = BS_PARADE; else
+        bs = BS_RUN;
     case AnimationSolver::Anim::RotL:
     case AnimationSolver::Anim::RotR:
       break;
@@ -751,11 +760,11 @@ float MdlVisual::viewDirection() const {
   return float(std::atan2(rz,rx)) * 180.f / float(M_PI);
   }
 
-const Animation::Sequence* MdlVisual::continueCombo(Npc& npc, AnimationSolver::Anim a,
+const Animation::Sequence* MdlVisual::continueCombo(Npc& npc, AnimationSolver::Anim a, BodyState bs,
                                                     WeaponState st, WalkBit wlk)  {
   if(st==WeaponState::Fist || st==WeaponState::W1H || st==WeaponState::W2H) {
     const Animation::Sequence *sq = solver.solveAnim(a,st,wlk,*skInst);
-    if(auto ret = skInst->continueCombo(solver,sq,npc.world().tickCount()))
+    if(auto ret = skInst->continueCombo(solver,sq,bs,npc.world().tickCount()))
       return ret;
     }
   return startAnimAndGet(npc,a,0,st,wlk);
@@ -815,7 +824,7 @@ void MdlVisual::rebindAttaches(Attach<View>& mesh, const Skeleton& to) {
   }
 
 void MdlVisual::syncAttaches() {
-  MdlVisual::MeshAttach* mesh[] = {&head, &sword,&bow,&ammunition,&stateItm};
+  MdlVisual::MeshAttach* mesh[] = {&head, &sword,&shield,&bow,&ammunition,&stateItm};
   for(auto i:mesh)
     syncAttaches(*i);
   for(auto& i:item)
@@ -845,7 +854,7 @@ std::string_view MdlVisual::visualSkeletonScheme() const {
   if(skeleton==nullptr)
     return "";
   auto ret = skeleton->name();
-  auto end = ret.find(".");
+  auto end = ret.find_first_of("._");
   return ret.substr(0, end);
   }
 
@@ -864,7 +873,7 @@ const Animation::Sequence* MdlVisual::startAnimItem(Npc &npc, std::string_view s
   return skInst->setAnimItem(solver,npc,scheme,state);
   }
 
-bool MdlVisual::startAnimSpell(Npc &npc, std::string_view scheme, bool invest) {
+const Animation::Sequence* MdlVisual::startAnimSpell(Npc &npc, std::string_view scheme, bool invest) {
   string_frm name("");
   if(invest)
     name = string_frm("S_",scheme,"CAST"); else
@@ -872,9 +881,9 @@ bool MdlVisual::startAnimSpell(Npc &npc, std::string_view scheme, bool invest) {
 
   const Animation::Sequence *sq = solver.solveFrm(name);
   if(skInst->startAnim(solver,sq,0,BS_CASTING,Pose::NoHint,npc.world().tickCount())) {
-    return true;
+    return sq;
     }
-  return false;
+  return nullptr;
   }
 
 bool MdlVisual::startAnimDialog(Npc &npc) {
@@ -883,9 +892,8 @@ bool MdlVisual::startAnimDialog(Npc &npc) {
   if(npc.bodyStateMasked()!=BS_STAND)
     return true;
 
-  //const int countG1 = 21;
-  const int countG2 = 11;
-  const int id      = std::rand()%countG2 + 1;
+  const uint16_t count = Gothic::inst().version().dialogGestureCount();
+  const int      id    = std::rand()%count + 1;
 
   char name[32]={};
   std::snprintf(name,sizeof(name),"T_DIALOGGESTURE_%02d",id);
@@ -897,7 +905,7 @@ bool MdlVisual::startAnimDialog(Npc &npc) {
   }
 
 void MdlVisual::startMMAnim(Npc&, std::string_view anim, std::string_view bone) {
-  MdlVisual::MeshAttach* mesh[] = {&head,&sword,&bow,&ammunition,&stateItm};
+  MdlVisual::MeshAttach* mesh[] = {&head,&sword,&shield,&bow,&ammunition,&stateItm};
   for(auto i:mesh) {
     if(i->bone!=bone)
       continue;
@@ -912,9 +920,8 @@ void MdlVisual::startFaceAnim(Npc& npc, std::string_view anim, float intensity, 
   }
 
 void MdlVisual::stopDlgAnim(Npc& npc) {
-  //const int countG1 = 21;
-  const int countG2 = 11;
-  for(uint16_t i=0; i<countG2; i++){
+  const uint16_t count = Gothic::inst().version().dialogGestureCount();
+  for(uint16_t i=0; i<count; i++){
     char buf[32]={};
     std::snprintf(buf,sizeof(buf),"T_DIALOGGESTURE_%02d",i+1);
     skInst->stopAnim(buf);

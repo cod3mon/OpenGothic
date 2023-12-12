@@ -18,18 +18,26 @@ StaticMesh::StaticMesh(const PackedMesh& mesh) {
     }
   bbox.assign(mesh.bbox());
 
-  if(Gothic::inst().doRayQuery()) {
+  if(Gothic::options().doRayQuery) {
     for(size_t i=0;i<mesh.subMeshes.size();++i) {
-      sub[i].blas = Resources::blas(vbo,ibo, sub[i].iboOffset, sub[i].iboLength);
+      sub[i].blas = Resources::blas(vbo, ibo, sub[i].iboOffset, sub[i].iboLength);
       }
     }
+  }
+
+const Tempest::AccelerationStructure* StaticMesh::blas(size_t iboOffset, size_t iboLen) const {
+  for(auto& i:sub)
+    if(i.iboOffset==iboOffset && i.iboLength==iboLen && !i.blas.isEmpty()) {
+      return &i.blas;
+      }
+  return nullptr;
   }
 
 StaticMesh::StaticMesh(const Material& mat, std::vector<Resources::Vertex> cvbo, std::vector<uint32_t> cibo) {
   assert(cvbo.size()<=PackedMesh::MaxVert);
   assert(cibo.size()<=PackedMesh::MaxInd);
 
-  if(Gothic::inst().doMeshShading()) {
+  if(Gothic::options().doMeshShading) {
     const size_t vert = cvbo.size();
     const size_t prim = cibo.size()/3;
 
@@ -57,9 +65,9 @@ StaticMesh::StaticMesh(const Material& mat, std::vector<Resources::Vertex> cvbo,
   for(size_t i=0;i<1;++i) {
     sub[i].texName   = "";
     sub[i].material  = mat;
-    sub[i].iboLength = Gothic::inst().doMeshShading() ? PackedMesh::MaxInd : ibo.size();
-    if(Gothic::inst().doRayQuery())
-      sub[i].blas = Resources::blas(vbo,ibo,0,ibo.size());
+    sub[i].iboLength = Gothic::options().doMeshShading ? PackedMesh::MaxInd : ibo.size();
+    if(Gothic::options().doRayQuery)
+      sub[i].blas = Resources::blas(vbo, ibo, 0, ibo.size());
     }
   bbox.assign(cvbo);
   }

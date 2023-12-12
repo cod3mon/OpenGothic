@@ -20,15 +20,17 @@ class FightAlgo final {
       MV_MOVEG    = 1,
       MV_MOVEA    = 2,
       MV_JUMPBACK = 3,
-      MV_ATACK    = 4,
-      MV_ATACKL   = 5,
-      MV_ATACKR   = 6,
+      MV_ATTACK   = 4,
+      MV_ATTACKL  = 5,
+      MV_ATTACKR  = 6,
       MV_STRAFEL  = 7,
       MV_STRAFER  = 8,
       MV_BLOCK    = 9,
       MV_WAIT     = 10,
       MV_WAITLONG = 11,
       MV_TURN2HIT = 12,
+      MV_TURNA    = 13,
+      MV_TURNG    = 14,
 
       MV_MAX      = 6
       };

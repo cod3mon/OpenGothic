@@ -13,13 +13,10 @@
 
 #include "game/definitions/svmdefinitions.h"
 #include "game/definitions/spelldefinitions.h"
-#include "game/definitions/fightaidefinitions.h"
 #include "game/aiouputpipe.h"
 #include "game/constants.h"
 #include "game/aistate.h"
 #include "game/questlog.h"
-#include "graphics/pfx/pfxobjects.h"
-#include "ui/documentmenu.h"
 
 class GameSession;
 class World;
@@ -29,6 +26,7 @@ class Item;
 class VisualFx;
 class ParticleFx;
 class Serialize;
+class Gothic;
 
 class ScriptFn final {
   public:
@@ -44,34 +42,30 @@ class ScriptFn final {
     }
   };
 
-
 class GameScript final {
   public:
     GameScript(GameSession &owner);
     ~GameScript();
 
     struct DlgChoice final {
-      std::string                       title;
-      int32_t                           sort=0;
-      uint32_t                          scriptFn=0;
-      bool                              isTrade=false;
-      phoenix::c_info*        handle=nullptr;
+      std::string      title;
+      int32_t          sort     = 0;
+      uint32_t         scriptFn = 0;
+      bool             isTrade  = false;
+      phoenix::c_info* handle   = nullptr;
       };
 
     bool         hasSymbolName(std::string_view fn);
 
-    void         initDialogs ();
-    void         loadDialogOU();
-
     void         initializeInstanceNpc(const std::shared_ptr<phoenix::c_npc>& npc, size_t instance);
     void         initializeInstanceItem(const std::shared_ptr<phoenix::c_item>& item, size_t instance);
+    void         resetVarPointers();
 
+    void         initDialogs();
     void         saveQuests(Serialize& fout);
     void         loadQuests(Serialize& fin);
     void         saveVar(Serialize& fout);
     void         loadVar(Serialize& fin);
-
-    void         resetVarPointers();
 
     inline auto& getVm() { return vm; }
     auto         questLog() const -> const QuestLog&;
@@ -79,6 +73,7 @@ class GameScript final {
     const World& world() const;
     World&       world();
     uint64_t     tickCount() const;
+    void         tick(uint64_t dt);
 
     uint32_t     rand(uint32_t max);
     void         removeItem(Item& it);
@@ -94,24 +89,23 @@ class GameScript final {
     std::string_view currencyName() const { return goldTxt; }
     int              npcDamDiveTime();
     int32_t          criticalDamageMultiplyer() const;
-
     phoenix::symbol* lockPickSymbol() const { return ItKE_lockpick; }
     uint32_t         lockPickId() const;
 
-    const phoenix::c_focus&          focusNorm()  const { return cFocusNorm;  }
-    const phoenix::c_focus&          focusMele()  const { return cFocusMele;  }
-    const phoenix::c_focus&          focusRange() const { return cFocusRange; }
-    const phoenix::c_focus&          focusMage()  const { return cFocusMage;  }
-    const phoenix::c_gil_values&     guildVal()   const { return *cGuildVal;   }
+    const phoenix::c_focus&      focusNorm()  const { return cFocusNorm;  }
+    const phoenix::c_focus&      focusMelee() const { return cFocusMelee; }
+    const phoenix::c_focus&      focusRange() const { return cFocusRange; }
+    const phoenix::c_focus&      focusMage()  const { return cFocusMage;  }
+    const phoenix::c_gil_values& guildVal()   const { return *cGuildVal;  }
 
-    phoenix::symbol*                        findSymbol(std::string_view s);
-    phoenix::symbol*                        findSymbol(const size_t s);
-    size_t                                  findSymbolIndex(std::string_view s);
-    size_t                                  symbolsCount() const;
+    phoenix::symbol*             findSymbol(std::string_view s);
+    phoenix::symbol*             findSymbol(const size_t s);
+    size_t                       findSymbolIndex(std::string_view s);
+    size_t                       symbolsCount() const;
 
-    const AiState&                          aiState  (ScriptFn id);
-    const phoenix::c_spell&                 spellDesc(int32_t splId);
-    const VisualFx*                         spellVfx (int32_t splId);
+    const AiState&               aiState  (ScriptFn id);
+    const phoenix::c_spell&      spellDesc(int32_t splId);
+    const VisualFx*              spellVfx (int32_t splId);
 
     auto dialogChoices(std::shared_ptr<phoenix::c_npc> self, std::shared_ptr<phoenix::c_npc> npc, const std::vector<uint32_t> &except, bool includeImp) -> std::vector<DlgChoice>;
     auto updateDialog (const GameScript::DlgChoice &dlg, Npc &player, Npc &npc) -> std::vector<GameScript::DlgChoice>;
@@ -144,7 +138,7 @@ class GameScript final {
     bool isDead       (const Npc &pl);
     bool isUnconscious(const Npc &pl);
     bool isTalk       (const Npc &pl);
-    bool isAttack      (const Npc &pl) const;
+    bool isAttack     (const Npc &pl) const;
 
     std::string_view spellCastAnim(Npc& npc, Item&  fn);
     std::string_view messageFromSvm(std::string_view id,int voice) const;
@@ -173,14 +167,6 @@ class GameScript final {
       using signature = R(P...);
       };
 
-    template <class F>
-    void bindExternal(const std::string& name, F function) {
-      vm.register_external(name, std::function<typename DetermineSignature<F>::signature> (
-        [this, function](auto ... v) { return (this->*function)(v...); }));
-      }
-
-    void               initCommon();
-
     struct GlobalOutput : AiOuputPipe {
       explicit GlobalOutput(GameScript& owner):owner(owner){}
 
@@ -195,6 +181,16 @@ class GameScript final {
       GameScript& owner;
       };
 
+    template <class F>
+    void bindExternal(const std::string& name, F function) {
+      vm.register_external(name, std::function<typename DetermineSignature<F>::signature> (
+                                   [this, function](auto ... v) { return (this->*function)(v...); }));
+      }
+
+    void  initCommon();
+    void  initSettings();
+    void  loadDialogOU();
+
     Item* findItem(phoenix::c_item* handle);
     Item* findItemById(size_t id);
     Item* findItemById(const std::shared_ptr<phoenix::instance>& handle);
@@ -206,12 +202,14 @@ class GameScript final {
     auto  findInfo    (size_t id) -> phoenix::c_info*;
     auto  findFocus(std::string_view name) -> phoenix::c_focus;
 
-    void  storeItem(Item* it);
+    void storeItem(Item* it);
 
-    bool  aiOutput   (Npc &from, std::string_view name, bool overlay);
-    bool  aiOutputSvm(Npc &from, std::string_view name, bool overlay);
+    bool aiOutput   (Npc &from, std::string_view name, bool overlay);
+    bool aiOutputSvm(Npc &from, std::string_view name, bool overlay);
 
-    bool  searchScheme(std::string_view sc, std::string_view listName);
+    bool searchScheme(std::string_view sc, std::string_view listName);
+
+    static phoenix::vm createVm(Gothic& gothic);
 
     bool game_initgerman     ();
     bool game_initenglish    ();
@@ -233,6 +231,7 @@ class GameScript final {
     int  wld_getformerplayerportalguild();
     void wld_setguildattitude (int gil1, int att, int gil2);
     int  wld_getguildattitude (int g1, int g0);
+    void wld_exchangeguildattitudes (std::string_view name);
     bool wld_istime           (int hour0, int min0, int hour1, int min1);
     bool wld_isfpavailable    (std::shared_ptr<phoenix::c_npc> self, std::string_view name);
     bool wld_isnextfpavailable(std::shared_ptr<phoenix::c_npc> self, std::string_view name);
@@ -276,6 +275,7 @@ class GameScript final {
     void npc_setrefusetalk   (std::shared_ptr<phoenix::c_npc> npcRef, int timeSec);
     bool npc_refusetalk      (std::shared_ptr<phoenix::c_npc> npcRef);
     int  npc_hasitems        (std::shared_ptr<phoenix::c_npc> npcRef, int itemId);
+    bool npc_hasspell        (std::shared_ptr<phoenix::c_npc> npcRef, int splId);
     int  npc_getinvitem      (std::shared_ptr<phoenix::c_npc> npcRef, int itemId);
     int  npc_removeinvitem   (std::shared_ptr<phoenix::c_npc> npcRef, int itemId);
     int  npc_removeinvitems  (std::shared_ptr<phoenix::c_npc> npcRef, int itemId, int amount);
@@ -316,7 +316,10 @@ class GameScript final {
     int  npc_getportalguild  (std::shared_ptr<phoenix::c_npc> npcRef);
     bool npc_isinplayersroom (std::shared_ptr<phoenix::c_npc> npcRef);
     std::shared_ptr<phoenix::c_item> npc_getreadiedweapon(std::shared_ptr<phoenix::c_npc> npcRef);
+    bool npc_hasreadiedweapon(std::shared_ptr<phoenix::c_npc> npcRef);
     bool npc_hasreadiedmeleeweapon(std::shared_ptr<phoenix::c_npc> npcRef);
+    bool npc_hasreadiedrangedweapon(std::shared_ptr<phoenix::c_npc> npcRef);
+    bool npc_hasrangedweaponwithammo(std::shared_ptr<phoenix::c_npc> npcRef);
     int  npc_isdrawingspell  (std::shared_ptr<phoenix::c_npc> npcRef);
     int  npc_isdrawingweapon (std::shared_ptr<phoenix::c_npc> npcRef);
     void npc_perceiveall     (std::shared_ptr<phoenix::c_npc> npcRef);
@@ -351,6 +354,7 @@ class GameScript final {
     void ai_lookat           (std::shared_ptr<phoenix::c_npc> selfRef, std::string_view waypoint);
     void ai_lookatnpc        (std::shared_ptr<phoenix::c_npc> selfRef, std::shared_ptr<phoenix::c_npc> npcRef);
     void ai_removeweapon     (std::shared_ptr<phoenix::c_npc> npcRef);
+    void ai_unreadyspell     (std::shared_ptr<phoenix::c_npc> npcRef);
     void ai_turntonpc        (std::shared_ptr<phoenix::c_npc> selfRef, std::shared_ptr<phoenix::c_npc> npcRef);
     void ai_outputsvm        (std::shared_ptr<phoenix::c_npc> selfRef, std::shared_ptr<phoenix::c_npc> targetRef, std::string_view name);
     void ai_outputsvm_overlay(std::shared_ptr<phoenix::c_npc> selfRef, std::shared_ptr<phoenix::c_npc> targetRef, std::string_view name);
@@ -424,6 +428,7 @@ class GameScript final {
 
     GameSession&                                                owner;
     phoenix::vm                                                 vm;
+    int32_t                                                     vmLang = -1;
     std::mt19937                                                randGen;
 
     std::vector<std::unique_ptr<ScriptPlugin>>                  plugins;
@@ -448,6 +453,7 @@ class GameScript final {
     float                                                       viewTimePerChar = 0.5;
     int32_t                                                     damCriticalMultiplier = 2;
     mutable std::unordered_map<std::string,uint32_t>            msgTimings;
+    size_t                                                      gilTblSize=0;
     size_t                                                      gilCount=0;
     std::vector<int32_t>                                        gilAttitudes;
     int                                                         aiOutOrderId=0;
@@ -458,6 +464,6 @@ class GameScript final {
     size_t                                                      ZS_Attack=0;
     size_t                                                      ZS_MM_Attack=0;
 
-    phoenix::c_focus                                            cFocusNorm,cFocusMele,cFocusRange,cFocusMage;
+    phoenix::c_focus                                            cFocusNorm,cFocusMelee,cFocusRange,cFocusMage;
     std::shared_ptr<phoenix::c_gil_values>            cGuildVal;
   };

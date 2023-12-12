@@ -9,100 +9,91 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(push_constant, std140) uniform PushConstant {
-  mat4 mvp;
-  mat4 mvpInv;
+  mat4 proj;
+  mat4 projInv;
   };
 
 layout(binding  = 0) uniform writeonly image2D result;
 
-layout(binding  = 1) uniform sampler2D diffuse;
-layout(binding  = 2) uniform sampler2D normals;
-layout(binding  = 3) uniform sampler2D depthBuf;
+layout(binding  = 1) uniform sampler2D  gbufDiffuse;
+layout(binding  = 2) uniform usampler2D gbufNormal;
+layout(binding  = 3) uniform sampler2D  depthBuf;
 
 layout(binding  = 4, std140) uniform UboScene {
   SceneDesc scene;
   };
 
-const uint  numSamples = 32;
-const uint  numIter    = 8;
-const float sphereLen  = 100;
+const uint  numSamples     = 32;
+const uint  numIter        = 8;
+const uint  samplesPerStep = numSamples/numIter;
+const float sphereLen      = 100;
+const float unorm16        = 65025;
 
 ivec2 fragCoord;
 ivec2 screenSize;
 mat3  tangent;
 
-shared uint vMin, vMax, vDiff;
 shared uint shMaxSteps;
 
-bool isSolved(float occlusion, float dx) {
-  vMin  = 256;
-  vMax  = 0;
+shared uint vAvg, vDiff;
+bool isSolved(float occlusion, int samples, bool eval) {
+  vAvg  = 0;
   vDiff = 0;
   barrier();
 
-  if(occlusion>=0) {
-    uint v = uint(occlusion*255+0.5);
-    uint d = uint(dx       *255+0.5);
-
-    atomicMin(vMin,  v);
-    atomicMax(vMax,  v);
-    atomicMax(vDiff, d);
+  if(occlusion>0) {
+    uint v = uint(occlusion*unorm16);
+    atomicAdd(vAvg, v);
     }
-  memoryBarrierShared();
   barrier();
 
-  uint diff = vMax - vMin;
+  if(eval) {
+    float avg  = float(vAvg)/float(gl_WorkGroupSize.x*gl_WorkGroupSize.y*unorm16);
+    float diff = abs(occlusion - avg);
+    atomicMax(vDiff, floatBitsToUint(diff));
+    }
+  barrier();
 
-  return (diff<4) || (vDiff<4);
+  float diff = uintBitsToFloat(vDiff);
+  float th   = 0.0;
+  if(samples>=12)
+    th = 0.1;
+  if(samples>=16)
+    th = 0.2;
+  if(samples>=24)
+    th = 0.4;
+  return diff<=th;
   }
 
-uint hash(uint x) {
-  x += ( x << 10u );
-  x ^= ( x >>  6u );
-  x += ( x <<  3u );
-  x ^= ( x >> 11u );
-  x += ( x << 15u );
-  return x;
+int estimateMaxSteps(float z) {
+  if(z>=1.0)
+    return 0; // sky
+  if(z>=0.999)
+    return 1; // almost sky
+  return int(numIter);
   }
 
-uint hash(uvec2 v) {
-  return hash(v.x ^ hash(v.y));
+shared vec3 shNormal;
+int estimateMinSteps(vec3 n) {
+  if(gl_LocalInvocationID.xy==uvec2(4)) {
+    shNormal = n;
+    }
+  vDiff = 4;
+  barrier();
+
+  if(dot(shNormal, n)<0.99)
+    vDiff = 8;
+  barrier();
+
+  return int(vDiff);
   }
 
-float floatConstruct(uint m) {
-  const uint ieeeMantissa = 0x007FFFFFu; // binary32 mantissa bitmask
-  const uint ieeeOne      = 0x3F800000u; // 1.0 in IEEE binary32
-
-  m &= ieeeMantissa;                     // Keep only mantissa bits (fractional part)
-  m |= ieeeOne;                          // Add fractional part to 1.0
-
-  float  f = uintBitsToFloat( m );       // Range [1:2]
-  return f - 1.0;                        // Range [0:1]
-  }
-
-// Sample i-th point from Hammersley point set of NumSamples points total.
-// See: http://holger.dammertz.org/stuff/notes_HammersleyOnHemisphere.html
-vec2 sampleHammersley(uint i, uint numSamples) {
-  uint bits = bitfieldReverse(i);
-  float vdc = float(bits) * 2.3283064365386963e-10; // / 0x100000000
-  return vec2(float(i)/float(numSamples), vdc);
-  }
-
-vec3 sampleHemisphere(uint i, uint numSamples, float offsetAng) {
-  const vec2  xi  = sampleHammersley(i,numSamples);
-  const float u1p = sqrt(max(0.0, 1.0 - xi.y*xi.y));
-  const float a   = M_PI*2.0*xi.x + offsetAng;
-  return vec3(cos(a) * u1p, sin(a) * u1p, xi.y);
-  }
-
-vec3 inverse(vec3 pos) {
-  vec4 ret = mvpInv*vec4(pos,1.0);
-  return (ret.xyz/ret.w);
+vec3 unproject(vec3 pos) {
+  return projectiveUnproject(projInv, pos);
   }
 
 vec3 project(vec3 pos) {
-  vec4 ret = mvp*vec4(pos,1.0);
-  return (ret.xyz/ret.w);
+  return projectiveProject(proj, pos);
   }
 
 float readZ(in vec2 posf) {
@@ -116,13 +107,11 @@ float sampleRadius(uint i, uint maxSmp) {
 vec2 calcOcclussion(const vec3 at0, const vec3 pos0, const float f0, uint seed, uint step) {
   float occlusion = 0, weightAll = 0;
 
-  const uint maxStep = numSamples/numIter;
-
-  [[unroll]]
-  for(uint i0=0; i0<maxStep; ++i0) {
+  [[loop]]
+  for(uint i0=0; i0<samplesPerStep; ++i0) {
     uint  i      = i0*step + seed;
     float r      = sampleRadius(i,numSamples);
-    vec3  h      = sampleHemisphere(i,numSamples,f0);
+    vec3  h      = sampleHemisphereCos(i,numSamples,f0).xzy;
 
     vec3  v      = tangent * h;
     vec3  at1    = project(pos0 + v*sphereLen*r);
@@ -131,43 +120,35 @@ vec2 calcOcclussion(const vec3 at0, const vec3 pos0, const float f0, uint seed, 
       }
 
     float z      = readZ(at1.xy);
-    vec3  at2    = vec3(at1.xy,z);
-    vec4  pos2   = mvpInv*vec4(at2,1.0);
-    pos2.xyz     = (pos2.xyz/pos2.w);
+    bool  isHit  = floor(z*32768.0+0.5) < floor(at1.z*32768.0);
+    float distQ  = 1;
+    float u      = 0.5;
 
-    vec3  dp     = (pos2.xyz-pos0);
-    bool  isHit  = floor(z*32768.0) < floor(at1.z*32768.0);
+    // distance attenuation
+    if(isHit) {
+      vec3  at2  = vec3(at1.xy,z);
+      vec3  pos2 = unproject(at2);
+      vec3  dp   = (pos2.xyz-pos0);
+      float lenQ = dot(dp,dp);
+      distQ = min(lenQ/(sphereLen*sphereLen),1);
+      } else {
+      distQ  = (r*r);
+      }
 
-    float lenQ   = dot(dp,dp);
-    float angW   = h.z;                                   // angle attenuation.
-    float distW  = 1.0-min(lenQ/(sphereLen*sphereLen),1); // distance attenuation
+    const float factor       = distQ;
+    const float smoothFactor = max(1.0 - factor * factor, 0.0);
+
+    const float distW = (1.0/max(factor, u)) * (smoothFactor*smoothFactor);
+
+    // distW = 1.0/max(0.2,distW);
+    // distW = pow(max(1.0 - distW, 0), 2);
+
     if(isHit)
-      occlusion += angW*distW;
+      occlusion += distW;
     weightAll += distW;
     }
 
   return vec2(occlusion,weightAll);
-  }
-
-int estimateMaxSteps(float z) {
-  if(z>=0.9995)
-    return 0; // sky
-
-  // NOTE: manual tuning been here
-  const float depth = linearDepth(z, scene.clipInfo);
-  if(depth < 0.25)
-    return 4;
-  if(depth < 0.5)
-    return 5;
-  if(depth <= 1)
-    return 8;
-  if(depth <= 1.5)
-    return 7;
-  if(depth <= 2)
-    return 6;
-  if(depth <= 7.0)
-     return 2;
-  return 1;
   }
 
 void main() {
@@ -178,9 +159,21 @@ void main() {
   fragCoord  = ivec2(gl_GlobalInvocationID.xy);
 
   const bool valid = all(lessThan(fragCoord, screenSize));
+  const vec2 inPos = vec2(2*fragCoord+ivec2(1,1))/vec2(screenSize)-vec2(1,1);
+  vec3 norm = vec3(0);
+
+  const vec3 camPos = unproject(vec3(0,0,0));
+  const vec3 at0    = vec3(inPos.xy,readZ(inPos.xy));
+  const vec3 pos0   = unproject(at0);
 
   if(valid) {
-    vec3 norm = normalize(texelFetch(normals,fragCoord,0).xyz*2.0-vec3(1.0));
+    const vec3 view = (pos0 - camPos);
+
+    norm = normalFetch(gbufNormal, fragCoord);
+    norm = (scene.view * vec4(norm,0)).xyz;
+    // if(dot(norm,view)>0)
+    //   norm = -norm;
+
     // Compute a tangent frame and rotate the half vector to world space
     vec3 up   = abs(norm.z) < 0.999f ? vec3(0.0f, 0.0f, 1.0f) : vec3(1.0f, 0.0f, 0.0f);
     tangent[0] = normalize(cross(up, norm));
@@ -189,38 +182,40 @@ void main() {
     }
 
   float occlusion = -1, prev= -1;
-  vec2  occ       = vec2(0,0.0001);
+  vec2  occ       = vec2(0,0.00001);
 
-  const vec2  inPos = vec2(2*fragCoord+ivec2(1,1))/vec2(screenSize)-vec2(1,1);
-  const vec3  at0   = vec3(inPos.xy,readZ(inPos.xy));
-  const vec3  pos0  = inverse(at0);
-  const uint  h0    = hash(fragCoord);
-  const float f0    = M_PI*2.0*floatConstruct(h0);
+  const float f0 = M_PI*2.0*interleavedGradientNoise(fragCoord);
 
   int maxSteps = estimateMaxSteps(at0.z);
   atomicMax(shMaxSteps, maxSteps);
   barrier();
-  // maxSteps = int(shMaxSteps);
 
+  // maxSteps = int(shMaxSteps);
   int  dbg  = 0;
+  int  smp  = int(samplesPerStep);
+  int  smin = estimateMinSteps(norm);
   bool eval = valid;
   for(int i=0; i<shMaxSteps; ++i) {
     if(eval && i<maxSteps) {
       dbg       = i+1;
+      smp      += int(samplesPerStep);
       prev      = occlusion;
       occ      += calcOcclussion(at0, pos0, f0, i, numIter);
-      occlusion = (occ.x/occ.y)*M_PI;
+      occlusion = (occ.x/occ.y);
       }
 
-    if(i==0)
+    int samples = (i+1)*int(samplesPerStep);
+    if(samples<smin)
       continue;
-    if(isSolved(occlusion, abs(occlusion-prev))) {
-      // NOTE: 'break' here cause device-lost on Intel O_o
-      eval = false;
-      }
+    if(isSolved(occlusion,samples,(i<maxSteps)))
+      break;
     }
 
-  if(valid)
-    imageStore(result, ivec2(gl_GlobalInvocationID.xy), vec4(occlusion));
-  // imageStore(result, ivec2(gl_GlobalInvocationID.xy), vec4(float(dbg+1)/255.0));
+  if(valid) {
+    imageStore(result, ivec2(gl_GlobalInvocationID.xy), vec4(2.0*occlusion));
+
+    // imageStore(result, ivec2(gl_GlobalInvocationID.xy), vec4(float(dbg)/10.0));
+    // imageStore(result, ivec2(gl_GlobalInvocationID.xy), vec4(float(smp)/100.0));
+    // imageStore(result, ivec2(gl_GlobalInvocationID.xy), vec4(uintBitsToFloat(vDiff)));
+    }
   }

@@ -88,6 +88,7 @@ InventoryMenu::InventoryMenu(const KeyCodec& key)
     columsCount = 5;
 
   setFocusPolicy(NoFocus);
+  setCursorShape(CursorShape::Hidden);
   takeTimer.timeout.bind(this,&InventoryMenu::onTakeStuff);
   }
 
@@ -425,11 +426,14 @@ void InventoryMenu::paintNumOverlay(PaintEvent& e) {
   }
 
 Size InventoryMenu::slotSize() const {
-  return Size(70,70);
+  const float scale = Gothic::options().interfaceScale;
+  const float cell  = float(Gothic::options().inventoryCellSize);
+  return Size(int(cell*scale),int(cell*scale));
   }
 
 int InventoryMenu::infoHeight() const {
-  return (Item::MAX_UI_ROWS+2)*int(Resources::font().pixelSize())+10/*padding bottom*/;
+  const float scale = Gothic::options().interfaceScale;
+  return (Item::MAX_UI_ROWS+2)*int(float(Resources::font().pixelSize())*scale)+10/*padding bottom*/;
   }
 
 size_t InventoryMenu::pagesCount() const {
@@ -464,7 +468,7 @@ void InventoryMenu::onItemAction(uint8_t slotHint) {
 
   if(state==State::Equip) {
     const size_t clsId = it->clsId();
-    if(it.isEquiped() && slotHint==Item::NSLOT) {
+    if(it.isEquipped() && slotHint==Item::NSLOT) {
       player->unequipItem(clsId);
       } else {
       player->useItem(clsId,slotHint,false);
@@ -635,7 +639,7 @@ void InventoryMenu::drawSlot(Painter &p, DrawPass pass, const Inventory::Iterato
                  0,0,selT->w(),selT->h());
       }
 
-    if(it.isEquiped() && selU!=nullptr){
+    if(it.isEquipped() && selU!=nullptr) {
       p.setBrush(*selU);
       p.drawRect(x,y,slotSize().w,slotSize().h,
                  0,0,selU->w(),selU->h());
@@ -644,7 +648,7 @@ void InventoryMenu::drawSlot(Painter &p, DrawPass pass, const Inventory::Iterato
     const int dsz = (id==sel.sel ? 5 : 0);
     renderer.drawItem(x-dsz, y-dsz, slotSize().w+2*dsz, slotSize().h+2*dsz, *it);
     } else {
-    auto& fnt = Resources::font();
+    auto fnt = Resources::font();
 
     if(it.count()>1) {
       string_frm vint(int(it.count()));
@@ -655,7 +659,8 @@ void InventoryMenu::drawSlot(Painter &p, DrawPass pass, const Inventory::Iterato
       }
 
     if(it.slot()!=Item::NSLOT) {
-      auto& fnt = Resources::font(Resources::FontType::Red);
+      fnt = Resources::font(Resources::FontType::Red);
+
       string_frm vint(int(it.slot()));
       auto sz = fnt.textSize(vint);
       fnt.drawText(p,x+10,
@@ -679,12 +684,13 @@ void InventoryMenu::drawGold(Painter &p, Npc &player, int x, int y) {
   }
 
 void InventoryMenu::drawHeader(Painter &p, std::string_view title, int x, int y) {
-  auto& fnt = Resources::font();
+  const float scale = Gothic::options().interfaceScale;
+  auto&       fnt   = Resources::font();
 
-  const int dw = slotSize().w*2;
-  const int dh = 34;
-  const int tw = fnt.textSize(title).w;
-  const int th = fnt.textSize(title).h;
+  const int   dw    = slotSize().w*2;
+  const int   dh    = int(34*scale);
+  const int   tw    = fnt.textSize(title).w;
+  const int   th    = fnt.textSize(title).h;
 
   if(tex) {
     p.setBrush(*tex);
@@ -699,10 +705,11 @@ void InventoryMenu::drawHeader(Painter &p, std::string_view title, int x, int y)
   }
 
 void InventoryMenu::drawInfo(Painter &p) {
-  const int dw   = std::min(w(),720);
-  const int dh   = infoHeight();//int(choice.size()*p.font().pixelSize())+2*padd;
-  const int x    = (w()-dw)/2;
-  const int y    = h()-dh-20;
+  const float scale = Gothic::options().interfaceScale;
+  const int   dw    = std::min(w(), int(720*scale));
+  const int   dh    = infoHeight();
+  const int   x     = (w()-dw)/2;
+  const int   y     = h()-dh-20;
 
   auto& pg  = activePage();
   auto& sel = activePageSel();
@@ -719,8 +726,9 @@ void InventoryMenu::drawInfo(Painter &p) {
     }
 
   auto& fnt = Resources::font();
-  auto desc = r.description();
-  int  tw   = fnt.textSize(desc).w;
+  auto  desc = r.description();
+  int   tw   = fnt.textSize(desc).w;
+
   fnt.drawText(p,x+(dw-tw)/2,y+int(fnt.pixelSize()),desc);
 
   for(size_t i=0;i<Item::MAX_UI_ROWS;++i){

@@ -8,6 +8,7 @@
 #include "camera.h"
 #include "gothic.h"
 #include "ui/videowidget.h"
+#include "utils/string_frm.h"
 
 #include <ui/videowidget.h>
 
@@ -57,6 +58,9 @@ Renderer::Renderer(Tempest::Swapchain& swapchain)
   Log::i("Depth format = ", Tempest::formatName(zBufferFormat), " Shadow format = ", Tempest::formatName(shadowFormat));
 
   Gothic::inst().onSettingsChanged.bind(this,&Renderer::initSettings);
+  Gothic::inst().toggleGi.bind(this, &Renderer::toggleGi);
+
+  settings.giEnabled = Gothic::options().doRtGi;
   initSettings();
   }
 
@@ -68,17 +72,23 @@ void Renderer::resetSwapchain() {
   auto& device = Resources::device();
   device.waitIdle();
 
-  const uint32_t w      = swapchain.w();
-  const uint32_t h      = swapchain.h();
+  const auto     res    = internalResolution();
+  const uint32_t w      = uint32_t(res.w);
+  const uint32_t h      = uint32_t(res.h);
   const uint32_t smSize = settings.shadowResolution;
 
   auto smpN = Sampler::nearest();
   smpN.setClamping(ClampMode::ClampToEdge);
 
-  sceneLinear = device.attachment(TextureFormat::R11G11B10UF,swapchain.w(),swapchain.h());
-  zbuffer     = device.zbuffer(zBufferFormat,w,h);
+  sceneLinear    = device.attachment(TextureFormat::R11G11B10UF,w,h);
+  zbuffer        = device.zbuffer(zBufferFormat,w,h);
+  if(w!=swapchain.w() || h!=swapchain.h())
+    zbufferUi = device.zbuffer(zBufferFormat, swapchain.w(), swapchain.h()); else
+    zbufferUi = ZBuffer();
 
-  if(Gothic::inst().doMeshShading()) {
+  if(Gothic::options().doMeshShading) {
+    hiz.atomicImg = device.properties().hasAtomicFormat(TextureFormat::R32U);
+
     uint32_t pw = nextPot(w);
     uint32_t ph = nextPot(h);
 
@@ -89,27 +99,34 @@ void Renderer::resetSwapchain() {
       hh = std::max(1u, (hh+1)/2u);
       }
 
-    std::vector<uint32_t> zb(hw*hh, 0);
-    hiZRaw = device.ssbo(zb);
-    hiZ    = device.image2d(TextureFormat::R16, hw, hh, true);
+    hiz.hiZ       = device.image2d(TextureFormat::R16,  hw, hh, true);
+    hiz.uboPot    = device.descriptors(Shaders::inst().hiZPot);
+    hiz.uboPot.set(0, zbuffer, smpN);
+    hiz.uboPot.set(1, hiz.hiZ);
 
-    uboHiZRaw = device.descriptors(Shaders::inst().hiZRaw);
-    uboHiZRaw.set(0, zbuffer, smpN);
-    uboHiZRaw.set(1, hiZRaw);
-    uboHiZRaw.set(2, hiZ);
+    hiz.uboMip = device.descriptors(Shaders::inst().hiZMip);
+    if(hiz.atomicImg) {
+      hiz.counter = device.image2d(TextureFormat::R32U, std::max(hw/4, 1u), std::max(hh/4, 1u), false);
+      hiz.uboMip.set(0, hiz.counter, Sampler::nearest(), 0);
+      } else {
+      hiz.counterBuf = device.ssbo(Tempest::Uninitialized, std::max(hw/4, 1u)*std::max(hh/4, 1u)*sizeof(uint32_t));
+      hiz.uboMip.set(0, hiz.counterBuf);
+      }
+    const uint32_t maxBind = 9, mip = hiz.hiZ.mipCount();
+    for(uint32_t i=0; i<maxBind; ++i)
+      hiz.uboMip.set(1+i, hiz.hiZ, Sampler::nearest(), std::min(i, mip-1));
 
-    uboHiZPot = device.descriptors(Shaders::inst().hiZPot);
-    uboHiZPot.set(0, zbuffer, smpN);
-    uboHiZPot.set(1, hiZRaw);
-    uboHiZPot.set(2, hiZ);
+    if(smSize>0) {
+      hiz.smProj    = device.zbuffer(shadowFormat, smSize, smSize);
+      hiz.uboReproj = device.descriptors(Shaders::inst().hiZReproj);
+      hiz.uboReproj.set(0, zbuffer, smpN);
+      // hiz.uboReproj.set(1, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
 
-    uboZMip.clear();
-    for(uint32_t i=0; (hw>1 && hh>1); ++i) {
-      hw = std::max(1u, hw/2u);
-      hh = std::max(1u, hh/2u);
-      auto& ubo = uboZMip.emplace_back(device.descriptors(Shaders::inst().hiZMip));
-      ubo.set(0, hiZ, smpN, i);
-      ubo.set(1, hiZ, smpN, i+1);
+      hiz.hiZSm1    = device.image2d(TextureFormat::R16, 64, 64, true);
+      hiz.uboPotSm1 = device.descriptors(Shaders::inst().hiZPot);
+      hiz.uboPotSm1.set(0, hiz.smProj, smpN);
+      hiz.uboPotSm1.set(1, hiz.hiZSm1);
+      hiz.uboMipSm1 = Tempest::DescriptorSet();
       }
     }
 
@@ -118,17 +135,17 @@ void Renderer::resetSwapchain() {
       shadowMap[i] = device.zbuffer(shadowFormat,smSize,smSize);
     }
 
-  sceneOpaque = device.attachment(TextureFormat::R11G11B10UF,swapchain.w(),swapchain.h());
-  sceneDepth  = device.attachment(TextureFormat::R32F,       swapchain.w(),swapchain.h());
+  sceneOpaque = device.attachment(TextureFormat::R11G11B10UF,w,h);
+  sceneDepth  = device.attachment(TextureFormat::R32F,       w,h);
 
-  gbufDiffuse = device.attachment(TextureFormat::RGBA8,      swapchain.w(),swapchain.h());
-  gbufNormal  = device.attachment(TextureFormat::R11G11B10UF,swapchain.w(),swapchain.h());
+  gbufDiffuse = device.attachment(TextureFormat::RGBA8,w,h);
+  gbufNormal  = device.attachment(TextureFormat::R32U, w,h);
 
   uboStash = device.descriptors(Shaders::inst().stash);
   uboStash.set(0,sceneLinear,Sampler::nearest());
   uboStash.set(1,zbuffer,    Sampler::nearest());
 
-  if(Gothic::inst().doRayQuery() && Resources::device().properties().bindless.nonUniformIndexing &&
+  if(Gothic::options().doRayQuery && Resources::device().properties().descriptors.nonUniformIndexing &&
      settings.shadowResolution>0)
     shadow.composePso = &Shaders::inst().shadowResolveRq;
   else if(settings.shadowResolution>0)
@@ -139,9 +156,12 @@ void Renderer::resetSwapchain() {
 
   water.underUbo = device.descriptors(Shaders::inst().underwaterT);
 
-  ssao.ssaoBuf = device.image2d(ssao.aoFormat, swapchain.w(),swapchain.h());
+  ssao.ssaoBuf = device.image2d(ssao.aoFormat, w,h);
   ssao.ssaoPso = &Shaders::inst().ssao;
   ssao.uboSsao = device.descriptors(*ssao.ssaoPso);
+
+  ssao.ssaoBlur = device.image2d(ssao.aoFormat, w,h);
+  ssao.uboBlur  = device.descriptors(Shaders::inst().ssaoBlur);
 
   irradiance.lut = device.image2d(TextureFormat::RGBA32F, 3,2);
   irradiance.pso = &Shaders::inst().irradiance;
@@ -150,16 +170,24 @@ void Renderer::resetSwapchain() {
   tonemapping.pso     = &Shaders::inst().tonemapping;
   tonemapping.uboTone = device.descriptors(*tonemapping.pso);
 
+  initGiData();
   prepareUniforms();
+  prepareRtUniforms();
   }
 
 void Renderer::initSettings() {
   settings.zEnvMappingEnabled = Gothic::inst().settingsGetI("ENGINE","zEnvMappingEnabled")!=0;
   settings.zCloudShadowScale  = Gothic::inst().settingsGetI("ENGINE","zCloudShadowScale") !=0;
 
-  settings.zVidBrightness = Gothic::inst().settingsGetF("VIDEO","zVidBrightness");
-  settings.zVidContrast   = Gothic::inst().settingsGetF("VIDEO","zVidContrast");
-  settings.zVidGamma      = Gothic::inst().settingsGetF("VIDEO","zVidGamma");
+  settings.zVidBrightness     = Gothic::inst().settingsGetF("VIDEO","zVidBrightness");
+  settings.zVidContrast       = Gothic::inst().settingsGetF("VIDEO","zVidContrast");
+  settings.zVidGamma          = Gothic::inst().settingsGetF("VIDEO","zVidGamma");
+
+  auto prevVidResIndex = settings.vidResIndex;
+  settings.vidResIndex = Gothic::inst().settingsGetF("INTERNAL","vidResIndex");
+  if(prevVidResIndex!=settings.vidResIndex) {
+    resetSwapchain();
+    }
 
   auto prevCompose = water.reflectionsPso;
   if(settings.zCloudShadowScale)
@@ -181,11 +209,26 @@ void Renderer::initSettings() {
     }
   }
 
+void Renderer::toggleGi() {
+  auto& device = Resources::device();
+  if(!Gothic::options().doRayQuery)
+    return;
+
+  auto prop = device.properties();
+  if(prop.tex2d.maxSize<4096 || !prop.hasStorageFormat(R11G11B10UF) || !prop.hasStorageFormat(R16))
+    return;
+
+  settings.giEnabled = !settings.giEnabled;
+  gi.fisrtFrame = true;
+
+  device.waitIdle();
+  initGiData();
+  prepareUniforms();
+  prepareRtUniforms();
+  }
+
 void Renderer::onWorldChanged() {
-  auto wview = Gothic::inst().worldView();
-  if(wview!=nullptr) {
-    wview->onTlasChanged.bind(this,&Renderer::setupTlas);
-    }
+  gi.fisrtFrame = true;
   prepareUniforms();
   }
 
@@ -214,25 +257,38 @@ void Renderer::prepareUniforms() {
   auto smpN = Sampler::nearest();
   smpN.setClamping(ClampMode::ClampToEdge);
 
+  if(!hiz.uboReproj.isEmpty()) {
+    hiz.uboReproj.set(1, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
+    }
+
   ssao.uboSsao.set(0, ssao.ssaoBuf);
   ssao.uboSsao.set(1, gbufDiffuse, smpN);
   ssao.uboSsao.set(2, gbufNormal,  smpN);
   ssao.uboSsao.set(3, zbuffer,     smpN);
   ssao.uboSsao.set(4, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
 
-  ssao.uboCompose.set(0, gbufDiffuse,  smpN);
-  ssao.uboCompose.set(1, gbufNormal,   smpN);
-  ssao.uboCompose.set(2, zbuffer,      smpN);
+  ssao.uboBlur.set(0, ssao.ssaoBlur);
+  ssao.uboBlur.set(1, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
+  ssao.uboBlur.set(2, ssao.ssaoBuf);
+  ssao.uboBlur.set(3, zbuffer, smpN);
+
+  ssao.uboCompose.set(0, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
+  ssao.uboCompose.set(1, gbufDiffuse,  smpN);
+  ssao.uboCompose.set(2, gbufNormal,   smpN);
   ssao.uboCompose.set(3, irradiance.lut);
   if(settings.zCloudShadowScale)
-    ssao.uboCompose.set(4, ssao.ssaoBuf, smpN);
+    ssao.uboCompose.set(4, ssao.ssaoBlur, smpN);
 
-  tonemapping.uboTone.set(0, sceneLinear);
+  {
+    auto smpB = Sampler::bilinear();
+    smpB.setClamping(ClampMode::ClampToEdge);
+    tonemapping.uboTone.set(0, sceneLinear, smpB);
+  }
 
   shadow.ubo.set(0, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
-  shadow.ubo.set(1, gbufDiffuse);
-  shadow.ubo.set(2, gbufNormal);
-  shadow.ubo.set(3, zbuffer);
+  shadow.ubo.set(1, gbufDiffuse, Sampler::nearest());
+  shadow.ubo.set(2, gbufNormal,  Sampler::nearest());
+  shadow.ubo.set(3, zbuffer,     Sampler::nearest());
 
   for(size_t r=0; r<Resources::ShadowLayers; ++r) {
     if(shadowMap[r].isEmpty())
@@ -248,8 +304,6 @@ void Renderer::prepareUniforms() {
   irradiance.ubo.set(2, wview->sky().skyLut());
 
   {
-    auto& sky = wview->sky();
-
     auto smp = Sampler::bilinear();
     smp.setClamping(ClampMode::MirroredRepeat);
 
@@ -258,19 +312,64 @@ void Renderer::prepareUniforms() {
 
     water.ubo.set(0, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
     water.ubo.set(1, sceneOpaque, smp);
-    water.ubo.set(2, gbufDiffuse, smp);
-    water.ubo.set(3, gbufNormal,  smp);
+    water.ubo.set(2, gbufDiffuse, smpd);
+    water.ubo.set(3, gbufNormal,  smpd);
     water.ubo.set(4, zbuffer,     smpd);
     water.ubo.set(5, sceneDepth,  smpd);
-
-    water.ubo.set(6,  wview->sky().skyLut());
-    water.ubo.set(7, *sky.cloudsDay()  .lay[0],Sampler::bilinear());
-    water.ubo.set(8, *sky.cloudsDay()  .lay[1],Sampler::bilinear());
-    water.ubo.set(9, *sky.cloudsNight().lay[0],Sampler::bilinear());
-    water.ubo.set(10,*sky.cloudsNight().lay[1],Sampler::bilinear());
+    water.ubo.set(6, wview->sky().skyLut());
   }
 
-  setupTlas(nullptr);
+  if(settings.giEnabled) {
+    auto smpN = Sampler::nearest();
+    smpN.setClamping(ClampMode::ClampToEdge);
+
+    gi.uboClear.set(0, gi.voteTable);
+    gi.uboClear.set(1, gi.hashTable);
+    gi.uboClear.set(2, gi.probes);
+    gi.uboClear.set(3, gi.freeList);
+
+    gi.uboProbes.set(0, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
+    gi.uboProbes.set(1, gbufDiffuse, Sampler::nearest());
+    gi.uboProbes.set(2, gbufNormal,  Sampler::nearest());
+    gi.uboProbes.set(3, zbuffer,     Sampler::nearest());
+    gi.uboProbes.set(4, gi.voteTable);
+    gi.uboProbes.set(5, gi.hashTable);
+    gi.uboProbes.set(6, gi.probes);
+    gi.uboProbes.set(7, gi.freeList);
+
+    gi.uboTrace.set(0, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
+    gi.uboTrace.set(1, gi.probesGBuffDiff);
+    gi.uboTrace.set(2, gi.probesGBuffNorm);
+    gi.uboTrace.set(3, gi.probesGBuffRayT);
+    gi.uboTrace.set(4, gi.hashTable);
+    gi.uboTrace.set(5, gi.probes);
+
+    gi.uboZeroIrr.set(0, gi.probesLighting);
+    gi.uboZeroIrr.set(1, Resources::fallbackBlack());
+
+    gi.uboPrevIrr.set(0, gi.probesLighting);
+    gi.uboPrevIrr.set(1, gi.probesLightingPrev);
+
+    gi.uboLight.set(0, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
+    gi.uboLight.set(1, gi.probesLighting);
+    gi.uboLight.set(2, gi.probesGBuffDiff, Sampler::nearest());
+    gi.uboLight.set(3, gi.probesGBuffNorm, Sampler::nearest());
+    gi.uboLight.set(4, gi.probesGBuffRayT, Sampler::nearest());
+    gi.uboLight.set(5, wview->sky().skyLut(), Sampler::bilinear());
+    gi.uboLight.set(6, shadowMap[1], Sampler::bilinear());
+    gi.uboLight.set(7, gi.probesLightingPrev, Sampler::nearest());
+    gi.uboLight.set(8, gi.hashTable);
+    gi.uboLight.set(9, gi.probes);
+
+    gi.uboDraw.set(0, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
+    gi.uboDraw.set(1, gi.probesLighting);
+    gi.uboDraw.set(2, gbufDiffuse,   Sampler::nearest());
+    gi.uboDraw.set(3, gbufNormal,    Sampler::nearest());
+    gi.uboDraw.set(4, zbuffer,       Sampler::nearest());
+    gi.uboDraw.set(5, ssao.ssaoBlur, smpN);
+    gi.uboDraw.set(6, gi.hashTable);
+    gi.uboDraw.set(7, gi.probes);
+    }
 
   const Texture2d* sh[Resources::ShadowLayers] = {};
   for(size_t i=0; i<Resources::ShadowLayers; ++i)
@@ -279,31 +378,41 @@ void Renderer::prepareUniforms() {
       }
   wview->setShadowMaps(sh);
 
-  wview->setHiZ(textureCast(hiZ));
+  wview->setHiZ(textureCast(hiz.hiZ));
   wview->setGbuffer(textureCast(gbufDiffuse), textureCast(gbufNormal));
   wview->setSceneImages(textureCast(sceneOpaque), textureCast(sceneDepth), zbuffer);
-  wview->setupUbo();
+  wview->prepareUniforms();
   }
 
-void Renderer::setupTlas(const Tempest::AccelerationStructure* tlas) {
+void Renderer::prepareRtUniforms() {
   auto wview = Gothic::inst().worldView();
   if(wview==nullptr)
     return;
   auto& scene = wview->sceneGlobals();
-  if(scene.tlas==nullptr)
+  if(scene.rtScene.tlas.isEmpty())
     return;
 
   if(shadow.composePso==&Shaders::inst().shadowResolveRq) {
-    shadow.ubo.set(6, *scene.tlas);
+    shadow.ubo.set(6, scene.rtScene.tlas);
     shadow.ubo.set(7, Sampler::bilinear());
-    shadow.ubo.set(8, scene.bindless.tex);
-    shadow.ubo.set(9, scene.bindless.vbo);
-    shadow.ubo.set(10,scene.bindless.ibo);
-    shadow.ubo.set(11,scene.bindless.iboOffset);
+    shadow.ubo.set(8, scene.rtScene.tex);
+    shadow.ubo.set(9, scene.rtScene.vbo);
+    shadow.ubo.set(10,scene.rtScene.ibo);
+    shadow.ubo.set(11,scene.rtScene.rtDesc);
+    }
+
+  if(!gi.uboTrace.isEmpty()) {
+    gi.uboTrace.set(6, scene.rtScene.tlas);
+    gi.uboTrace.set(7, Sampler::bilinear());
+    gi.uboTrace.set(8, scene.rtScene.tex);
+    gi.uboTrace.set(9, scene.rtScene.vbo);
+    gi.uboTrace.set(10,scene.rtScene.ibo);
+    gi.uboTrace.set(11,scene.rtScene.rtDesc);
     }
   }
 
 void Renderer::prepareSky(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId, WorldView& wview) {
+  cmd.setDebugMarker("Sky LUT");
   wview.prepareSky(cmd,fId);
   }
 
@@ -318,13 +427,17 @@ void Renderer::draw(Encoder<CommandBuffer>& cmd, uint8_t cmdId, size_t imgId,
     cmd.setFramebuffer({{result, Vec4(), Tempest::Preserve}});
     }
   cmd.setFramebuffer({{result, Tempest::Preserve, Tempest::Preserve}});
+  cmd.setDebugMarker("UI");
   uiLayer.draw(cmd);
 
   if(inventory.isOpen()!=InventoryMenu::State::Closed) {
-    cmd.setFramebuffer({{result, Tempest::Preserve, Tempest::Preserve}},{zbuffer, 1.f, Tempest::Preserve});
+    auto& zb = (zbufferUi.isEmpty() ? zbuffer : zbufferUi);
+    cmd.setFramebuffer({{result, Tempest::Preserve, Tempest::Preserve}},{zb, 1.f, Tempest::Preserve});
+    cmd.setDebugMarker("Inventory");
     inventory.draw(cmd,cmdId);
 
     cmd.setFramebuffer({{result, Tempest::Preserve, Tempest::Preserve}});
+    cmd.setDebugMarker("Inventory-counters");
     numOverlay.draw(cmd);
     }
   }
@@ -334,35 +447,44 @@ void Renderer::dbgDraw(Tempest::Painter& p) {
   if(!dbg)
     return;
 
-  //auto& tex = hiZ;
-  auto& tex = shadowMap[1];
-  // auto& tex = shadowMap[0];
+  std::vector<const Texture2d*> tex;
+  //tex.push_back(&textureCast(hiz.hiZ));
+  //tex.push_back(&textureCast(hiz.smProj));
+  //tex.push_back(&textureCast(hiz.hiZSm1));
+  tex.push_back(&textureCast(shadowMap[1]));
+  //tex.push_back(&textureCast(shadowMap[0]));
 
-  p.setBrush(Brush(textureCast(tex),Painter::Alpha,ClampMode::ClampToBorder));
-  auto sz = Size(p.brush().w(),p.brush().h());
-  if(sz.isEmpty())
-    return;
-
-  const int size = 200;
-  while(sz.w<size && sz.h<size) {
-    sz.w *= 2;
-    sz.h *= 2;
+  int left = 10;
+  for(auto& t:tex) {
+    p.setBrush(Brush(*t,Painter::Alpha,ClampMode::ClampToBorder));
+    auto sz = Size(p.brush().w(),p.brush().h());
+    if(sz.isEmpty())
+      continue;
+    const int size = 200;
+    while(sz.w<size && sz.h<size) {
+      sz.w *= 2;
+      sz.h *= 2;
+      }
+    while(sz.w>size*2 || sz.h>size*2) {
+      sz.w = (sz.w+1)/2;
+      sz.h = (sz.h+1)/2;
+      }
+    p.drawRect(left,50,sz.w,sz.h,
+               0,0,p.brush().w(),p.brush().h());
+    left += (sz.w+10);
     }
-  while(sz.w>size*2 || sz.h>size*2) {
-    sz.w = (sz.w+1)/2;
-    sz.h = (sz.h+1)/2;
-    }
-  p.drawRect(10,50,sz.w,sz.h,
-             0,0,p.brush().w(),p.brush().h());
   }
 
-void Renderer::draw(Tempest::Attachment& result, Tempest::Encoder<CommandBuffer>& cmd, uint8_t fId) {
+void Renderer::draw(Tempest::Attachment& result, Encoder<CommandBuffer>& cmd, uint8_t fId) {
   auto wview  = Gothic::inst().worldView();
   auto camera = Gothic::inst().camera();
   if(wview==nullptr || camera==nullptr) {
     cmd.setFramebuffer({{result, Vec4(), Tempest::Preserve}});
     return;
     }
+
+  if(wview->updateRtScene())
+    prepareRtUniforms();
 
   wview->updateLight();
   updateCamera(*camera);
@@ -383,15 +505,15 @@ void Renderer::draw(Tempest::Attachment& result, Tempest::Encoder<CommandBuffer>
   wview->preFrameUpdate(*camera,Gothic::inst().world()->tickCount(),fId);
   wview->prepareGlobals(cmd,fId);
 
-  drawHiZ(cmd,fId,*wview);
   prepareSky(cmd,fId,*wview);
+  drawHiZ(cmd,fId,*wview);
 
   drawGBuffer  (cmd,fId,*wview);
   drawShadowMap(cmd,fId,*wview);
 
   prepareSSAO(cmd);
   prepareFog (cmd,fId,*wview);
-  prepareIrradiance(cmd,fId);
+  prepareGi(cmd,fId);
 
   cmd.setFramebuffer({{sceneLinear, Tempest::Discard, Tempest::Preserve}}, {zbuffer, Tempest::Readonly});
   drawShadowResolve(cmd,fId,*wview);
@@ -404,19 +526,28 @@ void Renderer::draw(Tempest::Attachment& result, Tempest::Encoder<CommandBuffer>
   drawGWater(cmd,fId,*wview);
 
   cmd.setFramebuffer({{sceneLinear, Tempest::Preserve, Tempest::Preserve}}, {zbuffer, Tempest::Preserve, Tempest::Preserve});
+  cmd.setDebugMarker("Sun&Moon");
   wview->drawSunMoon(cmd,fId);
+  cmd.setDebugMarker("Translucent");
   wview->drawTranslucent(cmd,fId);
+
+  drawProbesDbg(cmd, fId);
 
   cmd.setFramebuffer({{sceneLinear, Tempest::Preserve, Tempest::Preserve}});
   drawReflections(cmd,fId);
   if(camera->isInWater()) {
+    cmd.setDebugMarker("Underwater");
     drawUnderwater(cmd,fId);
     } else {
+    cmd.setDebugMarker("Fog");
     wview->drawFog(cmd,fId);
     }
 
   cmd.setFramebuffer({{result, Tempest::Discard, Tempest::Preserve}});
+  cmd.setDebugMarker("Tonemapping");
   drawTonemapping(cmd);
+
+  wview->postFrameupdate();
   }
 
 void Renderer::drawTonemapping(Tempest::Encoder<Tempest::CommandBuffer>& cmd) {
@@ -444,36 +575,96 @@ void Renderer::stashSceneAux(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint
   if(!device.properties().hasSamplerFormat(zBufferFormat))
     return;
   cmd.setFramebuffer({{sceneOpaque, Tempest::Discard, Tempest::Preserve}, {sceneDepth, Tempest::Discard, Tempest::Preserve}});
+  cmd.setDebugMarker("Stash scene");
   cmd.setUniforms(Shaders::inst().stash, uboStash);
   cmd.draw(Resources::fsqVbo());
   }
 
-void Renderer::drawHiZ(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId, WorldView& view) {
-  if(!Gothic::inst().doMeshShading())
+void Renderer::initGiData() {
+  if(!settings.giEnabled)
     return;
 
-  cmd.setFramebuffer({}, {zbuffer, 1.f, Tempest::Preserve});
-  view.drawHiZ(cmd,fId);
+  auto& device = Resources::device();
 
-  cmd.setFramebuffer({});
-  cmd.setUniforms(Shaders::inst().hiZRaw, uboHiZRaw);
-  cmd.dispatchThreads(uint32_t(zbuffer.w()),uint32_t(zbuffer.h()));
+  gi.uboDbg         = DescriptorSet();
+  gi.probeInitPso   = &Shaders::inst().probeInit;
 
-  cmd.setFramebuffer({});
-  cmd.setUniforms(Shaders::inst().hiZPot, uboHiZPot);
-  cmd.dispatchThreads(uint32_t(hiZ.w()),uint32_t(hiZ.h()));
+  gi.probeClearPso  = &Shaders::inst().probeClear;
+  gi.probeClearHPso = &Shaders::inst().probeClearHash;
+  gi.probeMakeHPso  = &Shaders::inst().probeMakeHash;
+  gi.uboClear       = device.descriptors(*gi.probeClearPso);
 
-  uint32_t w = uint32_t(hiZ.w()), h = uint32_t(hiZ.h());
-  for(uint32_t i=0; i<uboZMip.size(); ++i) {
-    w = w/2;
-    h = h/2;
-    cmd.setUniforms(Shaders::inst().hiZMip, uboZMip[i]);
-    cmd.dispatchThreads(std::max<size_t>(w,1),std::max<size_t>(h,1));
+  gi.probeVotePso   = &Shaders::inst().probeVote;
+  gi.probeAllocPso  = &Shaders::inst().probeAlocation;
+  gi.probePrunePso  = &Shaders::inst().probePrune;
+  gi.uboProbes      = device.descriptors(*gi.probeAllocPso);
+
+  gi.uboZeroIrr     = device.descriptors(Shaders::inst().copyImg);
+  gi.uboPrevIrr     = device.descriptors(Shaders::inst().copyImg);
+
+  gi.probeTracePso  = &Shaders::inst().probeTrace;
+  gi.uboTrace       = device.descriptors(*gi.probeTracePso);
+
+  gi.probeLightPso  = &Shaders::inst().probeLighting;
+  gi.uboLight       = device.descriptors(*gi.probeLightPso);
+
+  gi.probeDrawPso   = &Shaders::inst().probeDraw;
+  gi.uboDraw        = device.descriptors(*gi.probeDrawPso);
+
+  const uint32_t maxProbes = gi.maxProbes;
+  if(gi.hashTable.isEmpty()) {
+    gi.hashTable          = device.ssbo(nullptr, 2'097'152*sizeof(uint32_t)); // 8MB
+    gi.voteTable          = device.ssbo(nullptr, gi.hashTable.byteSize());
+    gi.probes             = device.ssbo(nullptr, maxProbes*32 + 64);        // probes and header
+    gi.freeList           = device.ssbo(nullptr, maxProbes*sizeof(uint32_t) + sizeof(int32_t));
+    gi.probesGBuffDiff    = device.image2d(TextureFormat::RGBA8, gi.atlasDim*16, gi.atlasDim*16); // 16x16 tile
+    gi.probesGBuffNorm    = device.image2d(TextureFormat::RGBA8, gi.atlasDim*16, gi.atlasDim*16);
+    gi.probesGBuffRayT    = device.image2d(TextureFormat::R16,   gi.atlasDim*16, gi.atlasDim*16);
+    gi.probesLighting     = device.image2d(TextureFormat::R11G11B10UF, gi.atlasDim*3, gi.atlasDim*2);
+    gi.probesLightingPrev = device.image2d(TextureFormat::R11G11B10UF, uint32_t(gi.probesLighting.w()), uint32_t(gi.probesLighting.h()));
+    gi.fisrtFrame          = true;
     }
   }
 
+void Renderer::drawHiZ(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId, WorldView& view) {
+  if(!Gothic::options().doMeshShading)
+    return;
+
+  cmd.setDebugMarker("HiZ-occluders");
+  cmd.setFramebuffer({}, {zbuffer, 1.f, Tempest::Preserve});
+  view.drawHiZ(cmd,fId);
+
+  cmd.setDebugMarker("HiZ-mip");
+  cmd.setFramebuffer({});
+  cmd.setUniforms(Shaders::inst().hiZPot, hiz.uboPot);
+  cmd.dispatch(size_t(hiz.hiZ.w()), size_t(hiz.hiZ.h()));
+
+  uint32_t w = uint32_t(hiz.hiZ.w()), h = uint32_t(hiz.hiZ.h()), mip = hiz.hiZ.mipCount();
+  cmd.setUniforms(Shaders::inst().hiZMip, hiz.uboMip, &mip, sizeof(mip));
+  cmd.dispatchThreads(w,h);
+
+  /*
+  cmd.setDebugMarker("HiZ-shadows");
+  cmd.setFramebuffer({}, {hiz.smProj, 0, Tempest::Preserve});
+  cmd.setUniforms(Shaders::inst().hiZReproj, hiz.uboReproj);
+  cmd.dispatchMeshThreads(zbuffer.size());
+
+  cmd.setFramebuffer({});
+  cmd.setUniforms(Shaders::inst().hiZPot, hiz.uboPotSm1);
+  cmd.dispatch(size_t(hiz.hiZSm1.w()), size_t(hiz.hiZSm1.h()));
+
+  w = uint32_t(hiz.hiZSm1.w()), h = uint32_t(hiz.hiZSm1.h());
+  for(uint32_t i=0; i<hiz.uboMipSm1.size(); ++i) {
+    w = w/2;
+    h = h/2;
+    cmd.setUniforms(Shaders::inst().hiZMip, hiz.uboMipSm1[i]);
+    cmd.dispatchThreads(std::max<uint32_t>(w,1),std::max<uint32_t>(h,1));
+    }
+  */
+  }
+
 void Renderer::drawGBuffer(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId, WorldView& view) {
-  if(Gothic::inst().doMeshShading()) {
+  if(Gothic::options().doMeshShading) {
     cmd.setFramebuffer({{gbufDiffuse, Tempest::Vec4(),  Tempest::Preserve},
                         {gbufNormal,  Tempest::Discard, Tempest::Preserve}},
                        {zbuffer, Tempest::Preserve, Tempest::Preserve});
@@ -482,23 +673,30 @@ void Renderer::drawGBuffer(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_
                         {gbufNormal,  Tempest::Discard, Tempest::Preserve}},
                        {zbuffer, 1.f, Tempest::Preserve});
     }
+  cmd.setDebugMarker("GBuffer");
   view.drawGBuffer(cmd,fId);
   }
 
 void Renderer::drawGWater(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId, WorldView& view) {
+  static bool water = true;
+  if(!water)
+    return;
+
   cmd.setFramebuffer({{sceneLinear, Tempest::Preserve, Tempest::Preserve},
                       {gbufDiffuse, Vec4(0,0,0,0),     Tempest::Preserve},
-                      {gbufNormal,  Tempest::Preserve, Tempest::Preserve}},
+                      {gbufNormal,  Vec4(0,0,0,0),     Tempest::Preserve}},
                      {zbuffer, Tempest::Preserve, Tempest::Preserve});
   // cmd.setFramebuffer({{sceneLinear, Tempest::Preserve, Tempest::Preserve}},
   //                    {zbuffer, Tempest::Preserve, Tempest::Preserve});
+  cmd.setDebugMarker("GWater");
   view.drawWater(cmd,fId);
   }
 
 void Renderer::drawReflections(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId) {
+  cmd.setDebugMarker("Reflections");
   cmd.setUniforms(*water.reflectionsPso, water.ubo);
-  if(Gothic::inst().doMeshShading()) {
-    cmd.dispatchMeshThreads(size_t(gbufDiffuse.w()), size_t(gbufDiffuse.h()));
+  if(Gothic::options().doMeshShading) {
+    cmd.dispatchMeshThreads(gbufDiffuse.size());
     } else {
     cmd.draw(Resources::fsqVbo());
     }
@@ -518,6 +716,7 @@ void Renderer::drawShadowMap(Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId, 
 
   for(uint8_t i=0; i<Resources::ShadowLayers; ++i) {
     cmd.setFramebuffer({}, {shadowMap[i], 0.f, Tempest::Preserve});
+    cmd.setDebugMarker(string_frm("ShadowMap #",i));
     if(view.mainLight().dir().y > Camera::minShadowY)
       view.drawShadow(cmd,fId,i);
     }
@@ -527,15 +726,18 @@ void Renderer::drawShadowResolve(Encoder<Tempest::CommandBuffer>& cmd, uint8_t f
   static bool useDsm = true;
   if(!useDsm)
     return;
+  cmd.setDebugMarker("DirectSunLight");
   cmd.setUniforms(*shadow.composePso, shadow.ubo);
   cmd.draw(Resources::fsqVbo());
   }
 
 void Renderer::drawLights(Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId, WorldView& wview) {
+  cmd.setDebugMarker("Point lights");
   wview.drawLights(cmd,fId);
   }
 
 void Renderer::drawSky(Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId, WorldView& wview) {
+  cmd.setDebugMarker("Sky");
   wview.drawSky(cmd,fId);
   }
 
@@ -544,41 +746,133 @@ void Renderer::prepareSSAO(Encoder<Tempest::CommandBuffer>& cmd) {
     return;
   // ssao
   struct PushSsao {
-    Matrix4x4 mvp;
-    Matrix4x4 mvpInv;
+    Matrix4x4 proj;
+    Matrix4x4 projInv;
     } push;
-  push.mvp    = viewProjLwc;
-  push.mvpInv = viewProjLwc;
-  push.mvpInv.inverse();
+  push.proj    = proj;
+  push.projInv = proj;
+  push.projInv.inverse();
 
   cmd.setFramebuffer({});
+  cmd.setDebugMarker("SSAO");
   cmd.setUniforms(*ssao.ssaoPso, ssao.uboSsao, &push, sizeof(push));
-  cmd.dispatchThreads(size_t(ssao.ssaoBuf.w()), size_t(ssao.ssaoBuf.h()));
+  cmd.dispatchThreads(ssao.ssaoBuf.size());
+
+  cmd.setUniforms(Shaders::inst().ssaoBlur, ssao.uboBlur);
+  cmd.dispatchThreads(ssao.ssaoBuf.size());
   }
 
 void Renderer::prepareFog(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId, WorldView& wview) {
+  cmd.setDebugMarker("Fog LUTs");
   wview.prepareFog(cmd,fId);
   }
 
 void Renderer::prepareIrradiance(Tempest::Encoder<CommandBuffer>& cmd, uint8_t fId) {
   cmd.setFramebuffer({});
+  cmd.setDebugMarker("Irradiance");
   cmd.setUniforms(*irradiance.pso, irradiance.ubo);
   cmd.dispatch(1);
   }
 
+void Renderer::prepareGi(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId) {
+  if(!settings.giEnabled || !settings.zCloudShadowScale) {
+    prepareIrradiance(cmd,fId);
+    return;
+    }
+
+  const size_t maxHash = gi.hashTable.byteSize()/sizeof(uint32_t);
+
+  cmd.setFramebuffer({});
+
+  if(gi.fisrtFrame) {
+    cmd.setDebugMarker("GI-Init");
+    cmd.setUniforms(*gi.probeInitPso, gi.uboClear);
+    cmd.dispatch(1);
+
+    cmd.setUniforms(*gi.probeClearHPso, gi.uboClear);
+    cmd.dispatchThreads(maxHash);
+
+    cmd.setUniforms(Shaders::inst().copyImg, gi.uboZeroIrr);
+    cmd.dispatchThreads(gi.probesLighting.size());
+    gi.fisrtFrame = false;
+    }
+
+  static bool alloc = true;
+  cmd.setDebugMarker("GI-Alloc");
+  cmd.setUniforms(*gi.probeClearPso, gi.uboClear);
+  cmd.dispatchThreads(maxHash);
+
+  if(alloc) {
+    cmd.setUniforms(*gi.probeVotePso, gi.uboProbes);
+    cmd.dispatchThreads(sceneDepth.size());
+
+    cmd.setUniforms(*gi.probePrunePso, gi.uboClear);
+    cmd.dispatchThreads(gi.maxProbes);
+
+    cmd.setUniforms(*gi.probeAllocPso, gi.uboProbes);
+    cmd.dispatchThreads(sceneDepth.size());
+    }
+
+  cmd.setDebugMarker("GI-Trace");
+  cmd.setUniforms(*gi.probeTracePso, gi.uboTrace);
+  cmd.dispatch(1024); // dispath indirect? :(
+
+  cmd.setDebugMarker("GI-HashMap");
+  cmd.setUniforms(*gi.probeClearHPso, gi.uboClear);
+  cmd.dispatchThreads(maxHash);
+  cmd.setUniforms(*gi.probeMakeHPso, gi.uboClear);
+  cmd.dispatchThreads(gi.maxProbes);
+
+  cmd.setDebugMarker("GI-Lighting");
+  cmd.setUniforms(Shaders::inst().copyImg, gi.uboPrevIrr);
+  cmd.dispatchThreads(gi.probesLighting.size());
+
+  cmd.setUniforms(*gi.probeLightPso, gi.uboLight);
+  cmd.dispatch(1024);
+  }
+
+void Renderer::drawProbesDbg(Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId) {
+  if(!settings.giEnabled)
+    return;
+
+  static bool enable = false;
+  if(!enable)
+    return;
+
+  auto& device = Resources::device();
+  auto& pso    = Shaders::inst().probeDbg;
+
+  if(auto wview=Gothic::inst().worldView()) {
+    if(gi.uboDbg.isEmpty()) {
+      gi.uboDbg = device.descriptors(pso);
+      gi.uboDbg.set(0, wview->sceneGlobals().uboGlobal[SceneGlobals::V_Main]);
+      gi.uboDbg.set(1, gi.probesLighting);
+      gi.uboDbg.set(2, gi.probes);
+      gi.uboDbg.set(3, gi.hashTable);
+      }
+    }
+
+  cmd.setDebugMarker("GI-dbg");
+  cmd.setUniforms(pso, gi.uboDbg);
+  cmd.draw(36, 0, gi.maxProbes);
+  }
+
 void Renderer::drawAmbient(Encoder<CommandBuffer>& cmd, const WorldView& view) {
+  if(settings.giEnabled && settings.zCloudShadowScale) {
+    cmd.setDebugMarker("AmbientLight");
+    cmd.setUniforms(*gi.probeDrawPso, gi.uboDraw);
+    cmd.draw(Resources::fsqVbo());
+    return;
+    }
+
   struct Push {
     Vec3      ambient;
     float     exposure = 1;
-    Vec3      ldir;
-    float     padd1 = 0;
-    Vec3      clipInfo;
-  } push;
+    } push;
   push.ambient  = view.ambientLight();
-  push.ldir     = view.mainLight().dir();
-  push.clipInfo = clipInfo;
   push.exposure = view.sky().autoExposure();
 
+  cmd.setDebugMarker("AmbientLight");
   cmd.setUniforms(*ssao.ambientComposePso,ssao.uboCompose,&push,sizeof(push));
   cmd.draw(Resources::fsqVbo());
   }
@@ -634,4 +928,12 @@ Tempest::Attachment Renderer::screenshoot(uint8_t frameId) {
   pm.save("zbuffer.hdr");
 
   return img;
+  }
+
+Size Renderer::internalResolution() const {
+  if(settings.vidResIndex==0)
+     return Size(int(swapchain.w()), int(swapchain.h()));
+  if(settings.vidResIndex==1)
+    return Size(int(3*swapchain.w()/4), int(3*swapchain.h()/4));
+  return Size(int(swapchain.w()/2), int(swapchain.h()/2));
   }

@@ -17,6 +17,7 @@
 #include "world/triggers/abstracttrigger.h"
 #include "graphics/visualfx.h"
 #include "utils/fileutil.h"
+#include "commandline.h"
 #include "gothic.h"
 
 using namespace Tempest;
@@ -59,23 +60,26 @@ bool GameScript::GlobalOutput::isFinished() {
   return true;
   }
 
-GameScript::GameScript(GameSession &owner)
-  :owner(owner), vm(Gothic::inst().loadPhoenixScriptCode("GOTHIC.DAT"), phoenix::execution_flag::vm_allow_null_instance_access) {
 
+GameScript::GameScript(GameSession &owner)
+    :owner(owner), vm(createVm(Gothic::inst())) {
   if (vm.global_self() == nullptr || vm.global_other() == nullptr || vm.global_item() == nullptr ||
       vm.global_victim() == nullptr || vm.global_hero() == nullptr)
     throw std::runtime_error("Cannot find script symbol SELF, OTHER, ITEM, VICTIM, or HERO! Cannot proceed!");
 
+  vmLang = Gothic::inst().settingsGetI("GAME", "language");
   phoenix::register_all_script_classes(vm);
   vm.register_exception_handler(phoenix::lenient_vm_exception_handler);
   Gothic::inst().setupVmCommonApi(vm);
   aiDefaultPipe.reset(new GlobalOutput(*this));
   initCommon();
+  initSettings();
+  Gothic::inst().onSettingsChanged.bind(this,&GameScript::initSettings);
   }
 
 GameScript::~GameScript() {
+  Gothic::inst().onSettingsChanged.ubind(this,&GameScript::initSettings);
   }
-
 
 void GameScript::initCommon() {
   bindExternal("hlp_random",                     &GameScript::hlp_random);
@@ -95,6 +99,7 @@ void GameScript::initCommon() {
   bindExternal("wld_getformerplayerportalguild", &GameScript::wld_getformerplayerportalguild);
   bindExternal("wld_setguildattitude",           &GameScript::wld_setguildattitude);
   bindExternal("wld_getguildattitude",           &GameScript::wld_getguildattitude);
+  bindExternal("wld_exchangeguildattitudes",     &GameScript::wld_exchangeguildattitudes);
   bindExternal("wld_istime",                     &GameScript::wld_istime);
   bindExternal("wld_isfpavailable",              &GameScript::wld_isfpavailable);
   bindExternal("wld_isnextfpavailable",          &GameScript::wld_isnextfpavailable);
@@ -138,6 +143,7 @@ void GameScript::initCommon() {
   bindExternal("npc_setrefusetalk",              &GameScript::npc_setrefusetalk);
   bindExternal("npc_refusetalk",                 &GameScript::npc_refusetalk);
   bindExternal("npc_hasitems",                   &GameScript::npc_hasitems);
+  bindExternal("npc_hasspell",                   &GameScript::npc_hasspell);
   bindExternal("npc_getinvitem",                 &GameScript::npc_getinvitem);
   bindExternal("npc_removeinvitem",              &GameScript::npc_removeinvitem);
   bindExternal("npc_removeinvitems",             &GameScript::npc_removeinvitems);
@@ -178,7 +184,10 @@ void GameScript::initCommon() {
   bindExternal("npc_getportalguild",             &GameScript::npc_getportalguild);
   bindExternal("npc_isinplayersroom",            &GameScript::npc_isinplayersroom);
   bindExternal("npc_getreadiedweapon",           &GameScript::npc_getreadiedweapon);
+  bindExternal("npc_hasreadiedweapon",           &GameScript::npc_hasreadiedweapon);
   bindExternal("npc_hasreadiedmeleeweapon",      &GameScript::npc_hasreadiedmeleeweapon);
+  bindExternal("npc_hasreadiedrangedweapon",     &GameScript::npc_hasreadiedrangedweapon);
+  bindExternal("npc_hasrangedweaponwithammo",    &GameScript::npc_hasrangedweaponwithammo);
   bindExternal("npc_isdrawingspell",             &GameScript::npc_isdrawingspell);
   bindExternal("npc_isdrawingweapon",            &GameScript::npc_isdrawingweapon);
   bindExternal("npc_perceiveall",                &GameScript::npc_perceiveall);
@@ -213,6 +222,7 @@ void GameScript::initCommon() {
   bindExternal("ai_lookat",                      &GameScript::ai_lookat);
   bindExternal("ai_lookatnpc",                   &GameScript::ai_lookatnpc);
   bindExternal("ai_removeweapon",                &GameScript::ai_removeweapon);
+  bindExternal("ai_unreadyspell",                &GameScript::ai_unreadyspell);
   bindExternal("ai_turntonpc",                   &GameScript::ai_turntonpc);
   bindExternal("ai_outputsvm",                   &GameScript::ai_outputsvm);
   bindExternal("ai_outputsvm_overlay",           &GameScript::ai_outputsvm_overlay);
@@ -284,7 +294,7 @@ void GameScript::initCommon() {
   svm                  = std::make_unique<SvmDefinitions>(vm);
 
   cFocusNorm           = findFocus("Focus_Normal");
-  cFocusMele           = findFocus("Focus_Melee");
+  cFocusMelee          = findFocus("Focus_Melee");
   cFocusRange          = findFocus("Focus_Ranged");
   cFocusMage           = findFocus("Focus_Magic");
 
@@ -312,10 +322,10 @@ void GameScript::initCommon() {
     tradeValMult   = tradeMul != nullptr ? tradeMul->get_float() : 1.0f;
 
     auto* vtime     = vm.find_symbol_by_name("VIEW_TIME_PER_CHAR");
-    viewTimePerChar = vtime != nullptr ? vtime->get_float() : 0.55f;
+    viewTimePerChar = vtime != nullptr ? vtime->get_float() : 550.f;
     ItKE_lockpick   = vm.find_symbol_by_name("ItKE_lockpick");
     if(viewTimePerChar<=0.f)
-      viewTimePerChar=0.55f;
+      viewTimePerChar = 550.f;
     } else {
     itMi_Gold      = vm.find_symbol_by_name("ItMiNugget");
     if(itMi_Gold!=nullptr) { // FIXME
@@ -324,7 +334,7 @@ void GameScript::initCommon() {
       }
     //
     tradeValMult    = 1.f;
-    viewTimePerChar = 0.55f;
+    viewTimePerChar = 550.f;
     ItKE_lockpick   = vm.find_symbol_by_name("itkelockpick");
     }
 
@@ -335,18 +345,10 @@ void GameScript::initCommon() {
   auto* gilMax = vm.find_symbol_by_name("GIL_MAX");
   gilCount = gilMax!=nullptr ? size_t(gilMax->get_int()) : 0;
 
-  auto* tableSz = vm.find_symbol_by_name("TAB_ANZAHL");
-  auto* guilds  = vm.find_symbol_by_name("GIL_ATTITUDES");
-
-  if (tableSz != nullptr && guilds != nullptr) {
-    gilAttitudes.resize(gilCount*gilCount,ATT_HOSTILE);
-    size_t tbSz=size_t(std::sqrt(tableSz->get_int()));
-    for(size_t i=0;i<tbSz;++i)
-      for(size_t r=0;r<tbSz;++r) {
-        gilAttitudes[i*gilCount+r]=guilds->get_int(i*tbSz+r);
-        gilAttitudes[r*gilCount+i]=guilds->get_int(r*tbSz+i);
-        }
-  }
+  auto* tblSz = vm.find_symbol_by_name("TAB_ANZAHL");
+  gilTblSize = tblSz!=nullptr ? size_t(std::sqrt(tblSz->get_int())) : 0;
+  gilAttitudes.resize(gilCount*gilCount,ATT_HOSTILE);
+  wld_exchangeguildattitudes("GIL_ATTITUDES");
 
   auto id = vm.find_symbol_by_name("Gil_Values");
   if(id!=nullptr){
@@ -386,28 +388,38 @@ void GameScript::initCommon() {
       }
     }
 
-  if(Ikarus::isRequired(vm)) {
-    plugins.emplace_back(std::make_unique<Ikarus>(*this,vm));
+  Ikarus* ikarus = nullptr;
+  if(Ikarus::isRequired(vm) || LeGo::isRequired(vm)) {
+    auto ik = std::make_unique<Ikarus>(*this,vm);
+    ikarus = ik.get();
+    plugins.emplace_back(std::move(ik));
     }
   if(LeGo::isRequired(vm)) {
-    plugins.emplace_back(std::make_unique<LeGo>(*this,vm));
+    plugins.emplace_back(std::make_unique<LeGo>(*this,*ikarus,vm));
+    }
+  }
+
+void GameScript::initSettings() {
+  auto lang = Gothic::inst().settingsGetI("GAME", "language");
+  if(vmLang!=lang) {
+    vmLang = lang;
+    //vm     = createVm(Gothic::inst());
+    initDialogs();
     }
   }
 
 void GameScript::initDialogs() {
   loadDialogOU();
 
+  dialogsInfo.clear();
   vm.enumerate_instances_by_class_name("C_INFO", [this](phoenix::symbol& sym){
     dialogsInfo.push_back(vm.init_instance<phoenix::c_info>(&sym));
     });
   }
 
 void GameScript::loadDialogOU() {
-  auto gCutscene = Gothic::inst().nestedPath({u"_work",u"Data",u"Scripts",u"content",u"CUTSCENE"},Dir::FT_Dir);
-  static const char* names[] = {
-    "OU.DAT",
-    "OU.BIN",
-    };
+  std::string prefix = std::string(Gothic::inst().defaultOutputUnits());
+  std::vector<std::string> names = {prefix + ".DAT", prefix + ".BIN"};
 
   for(auto OU:names) {
     if(Resources::hasFile(OU)) {
@@ -416,10 +428,24 @@ void GameScript::loadDialogOU() {
       return;
       }
 
+    const size_t segment = OU.find_last_of("\\/");
+    if(segment!=std::string::npos && Resources::hasFile(OU.substr(segment+1))) {
+      auto buf = Resources::getFileBuffer(OU.substr(segment+1));
+      dialogs = phoenix::messages::parse(buf);
+      return;
+      }
+
     char16_t str16[256] = {};
     for(size_t i=0; OU[i] && i<255; ++i)
       str16[i] = char16_t(OU[i]);
-    std::u16string full = FileUtil::caseInsensitiveSegment(gCutscene,str16,Dir::FT_File);
+
+    auto gcutscene = CommandLine::inst().cutscenePath();
+    auto full      = FileUtil::caseInsensitiveSegment(gcutscene,str16,Dir::FT_File);
+    if(!FileUtil::exists(std::u16string(full)) && vmLang>=0) {
+      gcutscene = CommandLine::inst().cutscenePath(ScriptLang(vmLang));
+      full      = FileUtil::caseInsensitiveSegment(gcutscene,str16,Dir::FT_File);
+      }
+
     try {
       auto buf = phoenix::buffer::mmap(full);
       dialogs = phoenix::messages::parse(buf);
@@ -429,7 +455,7 @@ void GameScript::loadDialogOU() {
       // loop to next possible path
       }
     }
-  Log::e("unable to load Zen-file: \"OU.DAT\" or \"OU.BIN\"");
+  Log::e("none of Zen-files for OU could be loaded");
   }
 
 void GameScript::initializeInstanceNpc(const std::shared_ptr<phoenix::c_npc>& npc, size_t instance) {
@@ -972,12 +998,13 @@ int GameScript::invokeState(Npc* npc, Npc* oth, Npc* vic, ScriptFn fn) {
   ScopeVar victum(*vm.global_victim(), vic != nullptr ? vic->handlePtr() : nullptr);
 
   auto* sym = vm.find_symbol_by_index(uint32_t(fn.ptr));
-  int ret = 0;
+  int   ret = 0;
   if(sym!=nullptr && sym->rtype() == phoenix::datatype::integer) {
     ret = vm.call_function<int>(sym);
     }
   else if(sym!=nullptr) {
     vm.call_function<void>(sym);
+    ret = 0;
     }
 
   if(vm.global_other()->is_instance_of<phoenix::c_npc>()){
@@ -1180,12 +1207,13 @@ uint32_t GameScript::messageTime(std::string_view id) const {
     return time;
 
   string_frm name(id,".WAV");
-  auto  s   = Resources::loadSoundBuffer(name);
+  auto s = Resources::loadSoundBuffer(name);
   if(s.timeLength()>0) {
     time = uint32_t(s.timeLength());
     } else {
-    auto txt  = messageByName(id);
+    auto txt = messageByName(id);
     time = uint32_t(float(txt.length())*viewTimePerChar);
+    time = std::min(time, 16000u);
     }
   return time;
   }
@@ -1277,12 +1305,27 @@ bool GameScript::searchScheme(std::string_view sc, std::string_view listName) {
   return false;
   }
 
+phoenix::vm GameScript::createVm(Gothic& gothic) {
+  auto lang   = gothic.settingsGetI("GAME", "language");
+  auto script = gothic.loadScript(gothic.defaultGameDatFile(), ScriptLang(lang));
+  auto exef   = phoenix::execution_flag::vm_allow_null_instance_access;
+  if(Ikarus::isRequired(script)) {
+    exef |= phoenix::execution_flag::vm_ignore_const_specifier;
+    }
+  return phoenix::vm(std::move(script), exef);
+  }
+
 bool GameScript::hasSymbolName(std::string_view name) {
   return vm.find_symbol_by_name(name)!=nullptr;
   }
 
 uint64_t GameScript::tickCount() const {
   return owner.tickCount();
+  }
+
+void GameScript::tick(uint64_t dt) {
+  for(auto& i:plugins)
+    i->tick(dt);
   }
 
 uint32_t GameScript::rand(uint32_t max) {
@@ -1509,6 +1552,17 @@ int GameScript::wld_getguildattitude(int g1, int g0) {
   return ret;
   }
 
+void GameScript::wld_exchangeguildattitudes(std::string_view name) {
+  auto guilds = vm.find_symbol_by_name(name);
+  if(guilds==nullptr)
+    return;
+  for(size_t i=0;i<gilTblSize;++i)
+    for(size_t r=0;r<gilTblSize;++r) {
+      gilAttitudes[i*gilCount+r] = guilds->get_int(i*gilTblSize+r);
+      gilAttitudes[r*gilCount+i] = guilds->get_int(r*gilTblSize+i);
+      }
+  }
+
 bool GameScript::wld_istime(int hour0, int min0, int hour1, int min1) {
   gtime begin{hour0,min0}, end{hour1,min1};
   gtime now = owner.time();
@@ -1696,7 +1750,7 @@ void GameScript::mdl_setvisualbody(std::shared_ptr<phoenix::c_npc> npcRef, std::
     return;
 
   npc->setVisualBody(headTexNr,teethTexNr,bodyTexNr,bodyTexColor,body,head);
-  if(armor>=0) {
+  if(armor>0) {
     if(npc->itemCount(uint32_t(armor))==0)
       npc->addItem(uint32_t(armor),1);
     npc->useItem(uint32_t(armor),Item::NSLOT,true);
@@ -1834,7 +1888,7 @@ bool GameScript::npc_wasinstate(std::shared_ptr<phoenix::c_npc> npcRef, int stat
 
 int GameScript::npc_getdisttowp(std::shared_ptr<phoenix::c_npc> npcRef, std::string_view wpname) {
   auto  npc = findNpc(npcRef);
-  auto* wp  = world().findPoint(wpname);
+  auto* wp  = world().findPoint(wpname, false);
 
   if(npc!=nullptr && wp!=nullptr){
     float ret = std::sqrt(npc->qDistTo(wp));
@@ -1861,7 +1915,7 @@ void GameScript::npc_exchangeroutine(std::shared_ptr<phoenix::c_npc> npcRef, std
 
 bool GameScript::npc_isdead(std::shared_ptr<phoenix::c_npc> npcRef) {
   auto npc = findNpc(npcRef);
-  return npc==nullptr ? false : isDead(*npc);
+  return npc==nullptr || isDead(*npc);
   }
 
 bool GameScript::npc_knowsinfo(std::shared_ptr<phoenix::c_npc> npcRef, int infoinstance) {
@@ -1909,6 +1963,11 @@ bool GameScript::npc_refusetalk(std::shared_ptr<phoenix::c_npc> npcRef) {
 int GameScript::npc_hasitems(std::shared_ptr<phoenix::c_npc> npcRef, int itemId) {
   auto npc = findNpc(npcRef);
   return npc!=nullptr ? int(npc->itemCount(uint32_t(itemId))) : 0;
+  }
+
+bool GameScript::npc_hasspell(std::shared_ptr<phoenix::c_npc> npcRef, int splId) {
+  auto npc = findNpc(npcRef);
+  return npc!=nullptr && npc->inventory().hasSpell(splId);
   }
 
 int GameScript::npc_getinvitem(std::shared_ptr<phoenix::c_npc> npcRef, int itemId) {
@@ -2047,8 +2106,8 @@ int GameScript::npc_getheighttonpc(std::shared_ptr<phoenix::c_npc> aRef, std::sh
 
 std::shared_ptr<phoenix::c_item> GameScript::npc_getequippedmeleeweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
   auto npc = findNpc(npcRef);
-  if(npc!=nullptr && npc->currentMeleWeapon() != nullptr){
-    return npc->currentMeleWeapon()->handlePtr();
+  if(npc!=nullptr && npc->currentMeleeWeapon() != nullptr) {
+    return npc->currentMeleeWeapon()->handlePtr();
     }
   return nullptr;
   }
@@ -2082,13 +2141,13 @@ bool GameScript::npc_canseenpc(std::shared_ptr<phoenix::c_npc> npcRef, std::shar
 bool GameScript::npc_hasequippedweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
   auto npc = findNpc(npcRef);
   return (npc!=nullptr &&
-     (npc->currentMeleWeapon()!=nullptr ||
+     (npc->currentMeleeWeapon()!=nullptr ||
       npc->currentRangeWeapon()!=nullptr));
   }
 
 bool GameScript::npc_hasequippedmeleeweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
   auto npc = findNpc(npcRef);
-  return npc!=nullptr && npc->currentMeleWeapon()!=nullptr;
+  return npc!=nullptr && npc->currentMeleeWeapon()!=nullptr;
   }
 
 bool GameScript::npc_hasequippedrangedweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
@@ -2290,6 +2349,15 @@ std::shared_ptr<phoenix::c_item> GameScript::npc_getreadiedweapon(std::shared_pt
     }
   }
 
+bool GameScript::npc_hasreadiedweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
+  auto npc = findNpc(npcRef);
+  if(npc==nullptr)
+    return false;
+  auto ws = npc->weaponState();
+  return (ws==WeaponState::W1H || ws==WeaponState::W2H ||
+          ws==WeaponState::Bow || ws==WeaponState::CBow);
+  }
+
 bool GameScript::npc_hasreadiedmeleeweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
   auto npc = findNpc(npcRef);
   if(npc==nullptr) {
@@ -2297,6 +2365,19 @@ bool GameScript::npc_hasreadiedmeleeweapon(std::shared_ptr<phoenix::c_npc> npcRe
     }
   auto ws = npc->weaponState();
   return ws==WeaponState::W1H || ws==WeaponState::W2H;
+  }
+
+bool GameScript::npc_hasreadiedrangedweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
+  auto npc = findNpc(npcRef);
+  if(npc==nullptr)
+    return false;
+  auto ws = npc->weaponState();
+  return ws==WeaponState::Bow || ws==WeaponState::CBow;
+  }
+
+bool GameScript::npc_hasrangedweaponwithammo(std::shared_ptr<phoenix::c_npc> npcRef) {
+  auto npc = findNpc(npcRef);
+  return npc!=nullptr && npc->inventory().hasRangedWeaponWithAmmo();
   }
 
 int GameScript::npc_isdrawingspell(std::shared_ptr<phoenix::c_npc> npcRef) {
@@ -2393,10 +2474,7 @@ bool GameScript::npc_hasbodyflag(std::shared_ptr<phoenix::c_npc> npcRef, int bod
   auto npc = findNpc(npcRef);
   if(npc==nullptr)
     return false;
-
-  int32_t st = npc->bodyState()&BS_MAX_FLAGS;
-  bodyflag&=BS_MAX_FLAGS;
-  return bool(bodyflag&st);
+  return npc->hasStateFlag(BodyState(bodyflag));
   }
 
 int GameScript::npc_getlasthitspellid(std::shared_ptr<phoenix::c_npc> npcRef) {
@@ -2619,6 +2697,12 @@ void GameScript::ai_removeweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
     npc->aiPush(AiQueue::aiRemoveWeapon());
   }
 
+void GameScript::ai_unreadyspell(std::shared_ptr<phoenix::c_npc> npcRef) {
+  auto npc = findNpc(npcRef);
+  if(npc!=nullptr)
+    npc->aiPush(AiQueue::aiRemoveWeapon());
+  }
+
 void GameScript::ai_turntonpc(std::shared_ptr<phoenix::c_npc> selfRef, std::shared_ptr<phoenix::c_npc> npcRef) {
   auto npc  = findNpc(npcRef);
   auto self = findNpc(selfRef);
@@ -2741,7 +2825,7 @@ void GameScript::ai_equipbestarmor(std::shared_ptr<phoenix::c_npc> npcRef) {
 int GameScript::ai_equipbestmeleeweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
   auto npc = findNpc(npcRef);
   if(npc!=nullptr)
-    npc->aiPush(AiQueue::aiEquipBestMeleWeapon());
+    npc->aiPush(AiQueue::aiEquipBestMeleeWeapon());
   return 0;
   }
 
@@ -2781,7 +2865,7 @@ void GameScript::ai_drawweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
 void GameScript::ai_readymeleeweapon(std::shared_ptr<phoenix::c_npc> npcRef) {
   auto npc = findNpc(npcRef);
   if(npc!=nullptr)
-    npc->aiPush(AiQueue::aiReadyMeleWeapon());
+    npc->aiPush(AiQueue::aiReadyMeleeWeapon());
   }
 
 void GameScript::ai_readyrangedweapon(std::shared_ptr<phoenix::c_npc> npcRef) {

@@ -189,7 +189,7 @@ void Animation::setupIndex() {
 
 
 Animation::Sequence::Sequence(const phoenix::mds::animation& hdr, std::string_view fname) {
-  const phoenix::vdf_entry* entry = Resources::vdfsIndex().find_entry(fname);
+  const auto* entry = Resources::vdfsIndex().find(fname);
   if(entry==nullptr)
     return;
 
@@ -241,10 +241,17 @@ float Animation::Sequence::atkTotalTime(uint16_t comboLen) const {
   }
 
 bool Animation::Sequence::canInterrupt(uint64_t now, uint64_t sTime, uint16_t comboLen) const {
-  if(animCls==Animation::Transition)
+  const uint16_t cId = uint16_t(comboLen*2u);
+  if(animCls==Animation::Transition) {
+    if(size_t(cId+1)<data->defWindow.size() && data->defWindow.size()>0 && !data->defHitEnd.empty()) {
+      return !((now-sTime)<=data->defWindow[cId+0]);
+      }
     return false;
-  if(size_t(comboLen*2+1)<data->defWindow.size() && isInComboWindow(now-sTime,comboLen))
+    }
+
+  if(size_t(cId+1)<data->defWindow.size() && isInComboWindow(now-sTime,comboLen)) {
     return false;
+    }
   return true;
   }
 

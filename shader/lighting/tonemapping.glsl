@@ -37,12 +37,17 @@ vec3 acesTonemapInv(vec3 x) {
 
 // HACK: need to preserve look-and-fill of original graphics
 vec3 textureLinear(vec3 rgb) {
+  const vec3 linear = srgbDecode(rgb);
 #if defined(EMISSIVE)
-  vec3 linear = (srgbDecode(rgb)*1.0); // emissive objects, spells
-#else
-  vec3 linear = (srgbDecode(rgb)*0.78);
-#endif
+  // emissive objects, spells
   return acesTonemapInv(linear);
+#else
+  // return vec3(0.52, 0.41, 0.36); // wood
+  // return vec3(0.33, 0.34, 0.18); // leaves
+  // return vec3(0.9);
+  // return acesTonemapInv(linear*0.8);
+  return acesTonemapInv(linear*0.78+0.001)*Fd_LambertInv; // adjusted to have 'realistic' albedo values
+#endif
   }
 
 #endif

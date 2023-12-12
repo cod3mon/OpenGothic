@@ -71,14 +71,13 @@ class DynamicWorld final {
     struct NpcItem {
       public:
         NpcItem()=default;
-        NpcItem(DynamicWorld* owner,NpcBody* obj,float r):owner(owner),obj(obj),r(r){}
-        NpcItem(NpcItem&& it):owner(it.owner),obj(it.obj),r(it.r){it.obj=nullptr;}
+        NpcItem(DynamicWorld* owner,NpcBody* obj,float r):owner(owner),obj(obj){}
+        NpcItem(NpcItem&& it):owner(it.owner),obj(it.obj){it.obj=nullptr;}
         ~NpcItem();
 
         NpcItem& operator = (NpcItem&& it){
           std::swap(owner,it.owner);
           std::swap(obj,it.obj);
-          std::swap(r,it.r);
           return *this;
           }
 
@@ -95,12 +94,11 @@ class DynamicWorld final {
         auto  tryMove (const Tempest::Vec3& to, CollisionTest& out) -> DynamicWorld::MoveCode;
 
         bool  hasCollision() const;
-        float radius() const { return r; }
 
       private:
         DynamicWorld*       owner  = nullptr;
         NpcBody*            obj    = nullptr;
-        float               r      = 0.f;
+
         auto  implTryMove    (const Tempest::Vec3& dp, const Tempest::Vec3& pos0, CollisionTest& out) -> DynamicWorld::MoveCode;
         void  implSetPosition(const Tempest::Vec3& pos);
 
@@ -137,9 +135,9 @@ class DynamicWorld final {
       Tempest::Vec3           n={};
       phoenix::material_group mat    = phoenix::material_group::undefined;
       bool                    hasCol = false;
-      float               hitFraction = 0;
+      float                   hitFraction = 0;
 
-      const char*         sector = nullptr;
+      const char*             sector = nullptr;
       };
 
     struct RayWaterResult {

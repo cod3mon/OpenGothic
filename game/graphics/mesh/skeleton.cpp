@@ -58,6 +58,13 @@ size_t Skeleton::findNode(std::string_view name, size_t def) const {
   return def;
   }
 
+size_t Skeleton::findRootNode() const {
+  for(size_t i=0;i<nodes.size();++i)
+    if(nodes[i].parent==size_t(-1))
+      return i;
+  return size_t(-1);
+  }
+
 const Animation::Sequence* Skeleton::sequence(std::string_view name) const {
   if(anim!=nullptr)
     return anim->sequence(name);
@@ -77,12 +84,6 @@ std::string_view Skeleton::defaultMesh() const {
 
 float Skeleton::colisionHeight() const {
   return std::fabs(bboxCol[1].y-bboxCol[0].y);
-  }
-
-float Skeleton::colisionRadius() const {
-  float x = std::fabs(bboxCol[1].x-bboxCol[0].x);
-  float y = std::fabs(bboxCol[1].z-bboxCol[0].z);
-  return std::max(x,y); //TODO
   }
 
 void Skeleton::mkSkeleton() {

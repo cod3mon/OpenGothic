@@ -66,6 +66,11 @@ class PackedMesh {
   private:
     Tempest::Vec3 mBbox[2];
 
+    struct Prim {
+      uint32_t primId = 0;
+      uint32_t mat    = 0;
+      };
+
     struct SkeletalData {
       Tempest::Vec3 localPositions[4] = {};
       uint8_t       boneIndices[4]    = {};
@@ -90,6 +95,7 @@ class PackedMesh {
                     std::vector<uint32_t>* verticesId, const std::vector<glm::vec3>& vbo,
                     const std::vector<phoenix::wedge>& wedgeList,
                     const std::vector<SkeletalData>* skeletal);
+      bool    validate() const;
 
       bool    insert(const Vert& a, const Vert& b, const Vert& c);
       void    clear();

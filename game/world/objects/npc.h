@@ -56,17 +56,21 @@ class Npc final {
 
       CS_Invest_0    = 16,
       CS_Invest_1    = 17,
-      CS_Invest_2    = 19,
-      CS_Invest_3    = 20,
-      CS_Invest_4    = 21,
-      CS_Invest_5    = 22,
-      CS_Invest_6    = 23,
+      CS_Invest_2    = 18,
+      CS_Invest_3    = 19,
+      CS_Invest_4    = 20,
+      CS_Invest_5    = 21,
+      CS_Invest_6    = 22,
       CS_Invest_Last = 31,
+
       CS_Cast_0      = 32,
       CS_Cast_1      = 33,
       CS_Cast_2      = 34,
       CS_Cast_3      = 35,
       CS_Cast_Last   = 47,
+
+      CS_Emit_0      = 48,
+      CS_Emit_Last   = 63,
       };
 
     using Anim = AnimationSolver::Anim;
@@ -90,7 +94,6 @@ class Npc final {
     auto       position()   const -> Tempest::Vec3;
     auto       cameraBone(bool isFirstPerson = false) const -> Tempest::Vec3;
     auto       cameraMatrix(bool isFirstPerson = false) const -> Tempest::Matrix4x4;
-    float      collisionRadius() const;
     float      rotation() const;
     float      rotationRad() const;
     float      rotationY() const;
@@ -151,6 +154,7 @@ class Npc final {
     void       updateArmour  ();
     void       setSword      (MeshObjects::Mesh&& sword);
     void       setRangeWeapon(MeshObjects::Mesh&& bow);
+    void       setShield     (MeshObjects::Mesh&& shield);
     void       setMagicWeapon(Effect&& spell);
     void       setSlotItem   (MeshObjects::Mesh&& itm, std::string_view slot);
     void       setStateItem  (MeshObjects::Mesh&& itm, std::string_view slot);
@@ -187,6 +191,9 @@ class Npc final {
 
     void       setTalentSkill(Talent t,int32_t lvl);
     int32_t    talentSkill(Talent t) const;
+
+    void       invalidateTalentOverlays(Talent t);
+    void       invalidateTalentOverlays();
 
     void       setTalentValue(Talent t,int32_t lvl);
     int32_t    talentValue(Talent t) const;
@@ -229,6 +236,7 @@ class Npc final {
     BodyState bodyState() const;
     BodyState bodyStateMasked() const;
     bool      hasState(BodyState s) const;
+    bool      hasStateFlag(BodyState flg) const;
 
     void      setToFightMode(const size_t item);
     void      setToFistMode();
@@ -239,7 +247,7 @@ class Npc final {
     bool      canSwitchWeapon() const;
     bool      closeWeapon(bool noAnim);
     bool      drawWeaponFist();
-    bool      drawWeaponMele();
+    bool      drawWeaponMelee();
     bool      drawWeaponBow();
     bool      drawMage(uint8_t slot);
     bool      drawSpell(int32_t spell);
@@ -338,7 +346,7 @@ class Npc final {
     void      dropItem   (size_t id,                     size_t count=1);
     void      clearInventory();
     Item*     currentArmour();
-    Item*     currentMeleWeapon();
+    Item*     currentMeleeWeapon();
     Item*     currentRangeWeapon();
     auto      mapWeaponBone() const -> Tempest::Vec3;
     auto      mapHeadBone() const -> Tempest::Vec3;
@@ -346,6 +354,7 @@ class Npc final {
 
     bool      turnTo  (float dx, float dz, bool anim, uint64_t dt);
     bool      rotateTo(float dx, float dz, float speed, bool anim, uint64_t dt);
+    bool      isRotationAllowed() const;
     auto      playAnimByName(std::string_view name, BodyState bs) -> const Animation::Sequence*;
 
     bool      checkGoToNpcdistance(const Npc& other);
@@ -382,7 +391,7 @@ class Npc final {
     bool      haveOutput() const;
     void      setAiOutputBarrier(uint64_t dt, bool overlay);
 
-    bool      doAttack(Anim anim);
+    bool      doAttack(Anim anim, BodyState bs);
     void      commitSpell();
     void      takeDamage(Npc& other, const Bullet* b);
     void      takeDamage(Npc& other, const Bullet* b, const VisualFx* vfx, int32_t splId);

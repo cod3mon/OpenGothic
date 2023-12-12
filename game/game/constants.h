@@ -312,7 +312,7 @@ enum Action:uint32_t {
   AI_UseItem,
   AI_UseItemToState,
   AI_Teleport,
-  AI_DrawWeaponMele,
+  AI_DrawWeaponMelee,
   AI_DrawWeaponRange,
   AI_DrawSpell,
   AI_Attack,
@@ -447,4 +447,21 @@ inline const char* MaterialGroupNames[] = {
   "EARTH",
   "WATER",
   "SNOW",
-};
+  };
+
+enum AiStateCode : int32_t {
+  LOOP_CONTINUE = 0,
+  LOOP_END      = 1,
+  };
+
+enum class ScriptLang : int32_t {
+  NONE = -1,
+  EN   = 0,
+  DE   = 1,
+  PL   = 2,
+  RU   = 3,
+  FR   = 4,
+  ES   = 5,
+  IT   = 6,
+  CZ   = 7,
+  };

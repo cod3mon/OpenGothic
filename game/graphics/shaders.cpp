@@ -62,7 +62,7 @@ Shaders::Shaders() {
   instance = this;
   auto& device = Resources::device();
 
-  const bool meshlets = Gothic::inst().doMeshShading();
+  const bool meshlets = Gothic::options().doMeshShading;
 
   solid   .load(device,"gbuffer",   false,meshlets);
   atest   .load(device,"gbuffer_at",false,meshlets);
@@ -70,7 +70,8 @@ Shaders::Shaders() {
   emmision.load(device,"emi",       false,meshlets);
   multiply.load(device,"mul",       false,meshlets);
 
-  water   .load(device,"water",device.properties().tesselationShader,false);
+  water    .load(device,"water",false,false);
+  waterTess.load(device,"water",device.properties().tesselationShader,false);
 
   solidF  .load(device,"",  false,meshlets);
   atestF  .load(device,"at",false,meshlets);
@@ -79,26 +80,30 @@ Shaders::Shaders() {
   shadowAt.load(device,"shadow_at",false,meshlets);
 
   copyBuf = computeShader("copy.comp.sprv");
+  copyImg = computeShader("copy_img.comp.sprv");
   copy    = postEffect("copy");
 
-  stash = postEffect("stash");
+  path    = computeShader("path.comp.sprv");
+
+  stash   = postEffect("stash");
 
   ssao               = computeShader("ssao.comp.sprv");
+  ssaoBlur           = computeShader("ssao_blur.comp.sprv");
   ambientCompose     = ambientLightShader("ssao_compose");
   ambientComposeSsao = ambientLightShader("ssao_compose_ssao");
 
   shadowResolve      = postEffect("shadow_resolve", "shadow_resolve",    RenderState::ZTestMode::NoEqual);
   shadowResolveSh    = postEffect("shadow_resolve", "shadow_resolve_sh", RenderState::ZTestMode::NoEqual);
-  if(Gothic::inst().doRayQuery() && Resources::device().properties().bindless.nonUniformIndexing)
+  if(Gothic::options().doRayQuery && Resources::device().properties().descriptors.nonUniformIndexing)
     shadowResolveRq = postEffect("shadow_resolve", "shadow_resolve_rq", RenderState::ZTestMode::NoEqual);
 
   irradiance         = computeShader("irradiance.comp.sprv");
   cloudsLut          = computeShader("clouds_lut.comp.sprv");
-  skyTransmittance   = postEffect("sky_transmittance");
-  skyMultiScattering = postEffect("sky_multi_scattering");
-  skyViewLut         = postEffect("sky_view_lut");
+  skyTransmittance   = postEffect("sky", "sky_transmittance");
+  skyMultiScattering = postEffect("sky", "sky_multi_scattering");
+  skyViewLut         = postEffect("sky", "sky_view_lut");
+  skyViewCldLut      = postEffect("sky", "sky_view_clouds_lut");
 
-  fogViewLut         = postEffect("fog_view_lut");
   fogViewLut3dLQ     = computeShader("fog_view_lut_lq.comp.sprv");
   fogViewLut3dHQ     = computeShader("fog_view_lut_hq.comp.sprv");
   shadowDownsample   = computeShader("shadow_downsample.comp.sprv");
@@ -143,8 +148,8 @@ Shaders::Shaders() {
   sh           = GothicShader::get("light.frag.sprv");
   auto fsLight = device.shader(sh.data,sh.len);
   lights       = device.pipeline(Triangles, state, vsLight, fsLight);
-  if(Gothic::inst().doRayQuery()) {
-    if(Resources::device().properties().bindless.nonUniformIndexing) {
+  if(Gothic::options().doRayQuery) {
+    if(Resources::device().properties().descriptors.nonUniformIndexing) {
       sh      = GothicShader::get("light_rq_at.frag.sprv");
       fsLight = device.shader(sh.data,sh.len);
       } else {
@@ -158,9 +163,54 @@ Shaders::Shaders() {
   tonemapping = postEffect("tonemapping", "tonemapping", RenderState::ZTestMode::Always);
 
   if(meshlets) {
-    hiZRaw = computeShader("hiz_raw.comp.sprv");
-    hiZPot = computeShader("hiz_pot.comp.sprv");
-    hiZMip = computeShader("hiz_mip.comp.sprv");
+    hiZPot    = computeShader("hiz_pot.comp.sprv");
+    if(device.properties().hasAtomicFormat(TextureFormat::R32U))
+      hiZMip = computeShader("hiz_mip_img.comp.sprv"); else
+      hiZMip = computeShader("hiz_mip.comp.sprv");
+    }
+
+  if(meshlets && device.properties().meshlets.maxGroupSize.x>=256) {
+    RenderState state;
+    state.setCullFaceMode(RenderState::CullMode::Front);
+    state.setZTestMode   (RenderState::ZTestMode::Greater);
+
+    auto sh = GothicShader::get("hiz_reproject.mesh.sprv");
+    auto ms = device.shader(sh.data,sh.len);
+    sh = GothicShader::get("hiz_reproject.frag.sprv");
+    auto fs = device.shader(sh.data,sh.len);
+    hiZReproj = device.pipeline(state,Shader(),ms,fs);
+    }
+
+  if(Gothic::options().doRayQuery) {
+    RenderState state;
+    state.setCullFaceMode(RenderState::CullMode::NoCull);
+    state.setZTestMode   (RenderState::ZTestMode::Less);
+
+    auto sh = GothicShader::get("probe_dbg.vert.sprv");
+    auto vs = device.shader(sh.data,sh.len);
+    sh = GothicShader::get("probe_dbg.frag.sprv");
+    auto fs = device.shader(sh.data,sh.len);
+    probeDbg = device.pipeline(Triangles,state,vs,fs);
+
+    probeInit      = computeShader("probe_init.comp.sprv");
+    probeClear     = computeShader("probe_clear.comp.sprv");
+    probeClearHash = computeShader("probe_clear_hash.comp.sprv");
+    probeMakeHash  = computeShader("probe_make_hash.comp.sprv");
+    probeVote      = computeShader("probe_vote.comp.sprv");
+    probePrune     = computeShader("probe_prune.comp.sprv");
+    probeAlocation = computeShader("probe_allocation.comp.sprv");
+    probeTrace     = computeShader("probe_trace.comp.sprv");
+    probeLighting  = computeShader("probe_lighting.comp.sprv");
+
+    state.setBlendSource  (RenderState::BlendMode::One);
+    state.setBlendDest    (RenderState::BlendMode::SrcAlpha);  // for debugging
+    state.setZTestMode    (RenderState::ZTestMode::Always);
+    state.setZWriteEnabled(false);
+    sh = GothicShader::get("probe_ambient.vert.sprv");
+    vs = device.shader(sh.data,sh.len);
+    sh = GothicShader::get("probe_ambient.frag.sprv");
+    fs = device.shader(sh.data,sh.len);
+    probeDraw = device.pipeline(Triangles,state,vs,fs);
     }
 
   if(meshlets) {
@@ -201,6 +251,11 @@ Shaders& Shaders::inst() {
   }
 
 const RenderPipeline* Shaders::materialPipeline(const Material& mat, ObjectsBucket::Type t, PipelineType pt) const {
+  if(t==ObjectsBucket::Static) {
+    // same shader
+    t = ObjectsBucket::Movable;
+    }
+
   const auto alpha = (mat.isGhost ? Material::Ghost : mat.alpha);
 
   for(auto& i:materials) {
@@ -233,7 +288,9 @@ const RenderPipeline* Shaders::materialPipeline(const Material& mat, ObjectsBuck
       shadow   = &shadowAt;
       break;
     case Material::Water:
-      forward  = &water;
+      if(mat.waveMaxAmplitude>0.f)
+        forward  = &waterTess; else
+        forward  = &water;
       break;
     case Material::Ghost:
       forward  = &ghost;
@@ -354,7 +411,7 @@ RenderPipeline Shaders::fogShader(std::string_view name) {
     state.setBlendDest(RenderState::BlendMode::OneMinusSrcAlpha);
     }
 
-  auto sh = GothicShader::get(string_frm(name,".vert.sprv"));
+  auto sh = GothicShader::get("sky.vert.sprv");
   auto vs = device.shader(sh.data,sh.len);
 
   sh      = GothicShader::get(string_frm(name,".frag.sprv"));
@@ -414,7 +471,7 @@ RenderPipeline Shaders::ambientLightShader(std::string_view name) {
   RenderState state;
   state.setCullFaceMode (RenderState::CullMode::Front);
   state.setBlendSource  (RenderState::BlendMode::One);
-  state.setBlendDest    (RenderState::BlendMode::One);
+  state.setBlendDest    (RenderState::BlendMode::SrcAlpha); // debug
   state.setZTestMode    (RenderState::ZTestMode::NoEqual);
   state.setZWriteEnabled(false);
 

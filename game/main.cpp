@@ -10,8 +10,12 @@
 #include <Tempest/DirectX12Api>
 #endif
 
-#if defined(__OSX__)
+#if defined(__APPLE__)
 #include <Tempest/MetalApi>
+#endif
+
+#if defined(__IOS__)
+#include "utils/installdetect.h"
 #endif
 
 #include "utils/crashlog.h"
@@ -20,7 +24,7 @@
 #include "build.h"
 #include "commandline.h"
 
-const char* selectDevice(const Tempest::AbstractGraphicsApi& api) {
+std::string_view selectDevice(const Tempest::AbstractGraphicsApi& api) {
   auto d = api.devices();
 
   static Tempest::Device::Props p;
@@ -34,7 +38,7 @@ const char* selectDevice(const Tempest::AbstractGraphicsApi& api) {
     p = d[0];
     return p.name;
     }
-  return nullptr;
+  return "";
   }
 
 std::unique_ptr<Tempest::AbstractGraphicsApi> mkApi(const CommandLine& g) {
@@ -47,14 +51,14 @@ std::unique_ptr<Tempest::AbstractGraphicsApi> mkApi(const CommandLine& g) {
       break;
 #endif
     case CommandLine::Vulkan:
-#if !defined(__OSX__)
+#if !defined(__APPLE__)
       return std::make_unique<Tempest::VulkanApi>(flg);
 #else
       break;
 #endif
     }
 
-#if defined(__OSX__)
+#if defined(__APPLE__)
   return std::make_unique<Tempest::MetalApi>(flg);
 #else
   return std::make_unique<Tempest::VulkanApi>(flg);
@@ -62,6 +66,13 @@ std::unique_ptr<Tempest::AbstractGraphicsApi> mkApi(const CommandLine& g) {
   }
 
 int main(int argc,const char** argv) {
+#if defined(__IOS__)
+  {
+    auto appdir = InstallDetect::applicationSupportDirectory();
+    std::filesystem::current_path(appdir);
+  }
+#endif
+
   try {
     static Tempest::WFile logFile("log.txt");
     Tempest::Log::setOutputCallback([](Tempest::Log::Mode mode, const char* text) {
@@ -94,12 +105,12 @@ int main(int argc,const char** argv) {
   CrashLog::setup();
 
   Tempest::Log::i(appBuild);
+  Workers::setThreadName("Main thread");
 
   CommandLine          cmd{argc,argv};
   auto                 api     = mkApi(cmd);
   const auto           gpuName = selectDevice(*api);
-  if(gpuName!=nullptr)
-    CrashLog::setGpu(gpuName);
+  CrashLog::setGpu(gpuName);
 
   Tempest::Device      device{*api,gpuName};
   CrashLog::setGpu(device.properties().name);

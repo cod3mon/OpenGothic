@@ -178,7 +178,7 @@ LightGroup::LightGroup(const SceneGlobals& scene)
   :scene(scene) {
   auto& device = Resources::device();
   for(auto& u:uboBuf)
-    u = device.ubo<Ubo>(nullptr,1);
+    u = device.ubo(Ubo());
 
   LightBucket* bucket[2] = {&bucketSt, &bucketDyn};
   for(auto b:bucket) {
@@ -212,7 +212,7 @@ LightGroup::LightGroup(const SceneGlobals& scene)
   vbo = device.vbo(v,8);
 
   try {
-    auto filename = Gothic::inst().nestedPath({u"_work", u"Data", u"Presets", u"LIGHTPRESETS.ZEN"}, Dir::FT_File);
+    auto filename = Gothic::nestedPath({u"_work", u"Data", u"Presets", u"LIGHTPRESETS.ZEN"}, Dir::FT_File);
     auto buf = phoenix::buffer::mmap(filename);
     auto zen = phoenix::archive_reader::open(buf);
 
@@ -332,7 +332,7 @@ LightSource& LightGroup::getL(size_t id) {
   }
 
 RenderPipeline& LightGroup::shader() const {
-  if(Gothic::inst().doRayQuery())
+  if(Gothic::options().doRayQuery)
     return Shaders::inst().lightsRq;
   return Shaders::inst().lights;
   }
@@ -357,10 +357,10 @@ void LightGroup::tick(uint64_t time) {
     ssbo.pos   = light.position();
     ssbo.color = light.currentColor();
     ssbo.range = light.currentRange();
-
-    for(auto& updated:bucketDyn.updated)
-      updated = false;
     }
+
+  for(auto& updated:bucketDyn.updated)
+    updated = false;
   }
 
 void LightGroup::preFrameUpdate(uint8_t fId) {
@@ -387,14 +387,12 @@ void LightGroup::preFrameUpdate(uint8_t fId) {
   ubo.origin    = scene.originLwc;
   std::memcpy(ubo.fr,fr.f,sizeof(ubo.fr));
 
-  uboBuf[fId].update(&ubo,0,1);
+  uboBuf[fId].update(&ubo);
   }
 
 void LightGroup::draw(Encoder<CommandBuffer>& cmd, uint8_t fId) {
   static bool light = true;
   if(!light)
-    return;
-  if(Gothic::inst().doRayQuery() && scene.tlas==nullptr)
     return;
 
   auto& p = shader();
@@ -408,7 +406,7 @@ void LightGroup::draw(Encoder<CommandBuffer>& cmd, uint8_t fId) {
     }
   }
 
-void LightGroup::setupUbo() {
+void LightGroup::prepareUniforms() {
   LightBucket* bucket[2] = {&bucketSt, &bucketDyn};
   for(auto b:bucket) {
     for(int i=0;i<Resources::MaxFramesInFlight;++i) {
@@ -417,15 +415,22 @@ void LightGroup::setupUbo() {
       u.set(1,*scene.gbufNormals,Sampler::nearest());
       u.set(2,*scene.zbuffer,    Sampler::nearest());
       u.set(3,uboBuf[i]);
-      if(Gothic::inst().doRayQuery() && scene.tlas!=nullptr) {
-        if(Resources::device().properties().bindless.nonUniformIndexing) {
-          u.set(6, Sampler::bilinear());
-          u.set(7, scene.bindless.tex);
-          u.set(8, scene.bindless.vbo);
-          u.set(9, scene.bindless.ibo);
-          u.set(10,scene.bindless.iboOffset);
-          }
-        u.set(5,*scene.tlas);
+      }
+    }
+  }
+
+void LightGroup::prepareRtUniforms() {
+  LightBucket* bucket[2] = {&bucketSt, &bucketDyn};
+  for(auto b:bucket) {
+    for(int i=0;i<Resources::MaxFramesInFlight;++i) {
+      auto& u = b->ubo[i];
+      u.set(6,scene.rtScene.tlas);
+      if(Resources::device().properties().descriptors.nonUniformIndexing) {
+        u.set(7, Sampler::bilinear());
+        u.set(8, scene.rtScene.tex);
+        u.set(9, scene.rtScene.vbo);
+        u.set(10,scene.rtScene.ibo);
+        u.set(11,scene.rtScene.rtDesc);
         }
       }
     }

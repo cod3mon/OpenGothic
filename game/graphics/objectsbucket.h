@@ -9,14 +9,14 @@
 #include "material.h"
 #include "resources.h"
 #include "sceneglobals.h"
-#include "matrixstorage.h"
+#include "instancestorage.h"
 #include "graphics/mesh/submesh/staticmesh.h"
 #include "graphics/mesh/submesh/animmesh.h"
 #include "graphics/dynamic/visibilitygroup.h"
 #include "graphics/dynamic/visibleset.h"
 
 class Pose;
-class Bindless;
+class RtScene;
 class VisualObjects;
 
 class ObjectsBucket {
@@ -102,18 +102,22 @@ class ObjectsBucket {
     const void*               meshPointer()   const;
     VisibleSet&               visibilitySet() { return visSet; };
 
+    const Tempest::RenderPipeline* pso() const { return pMain; }
+
     size_t                    size()          const { return valSz;      }
     size_t                    alloc(const StaticMesh& mesh, size_t iboOffset, size_t iboLen, const Bounds& bounds,
                                     const Material& mat);
     size_t                    alloc(const AnimMesh& mesh, size_t iboOffset, size_t iboLen,
-                                    const MatrixStorage::Id& anim);
+                                    const InstanceStorage::Id& anim);
     size_t                    alloc(const Bounds& bounds);
     void                      free(const size_t objId);
 
-    virtual void              setupUbo();
+    virtual void              prepareUniforms();
     virtual void              invalidateUbo(uint8_t fId);
-    virtual void              fillTlas(std::vector<Tempest::RtInstance>& inst, std::vector<uint32_t>& iboOff, Bindless& out);
+    virtual void              fillTlas(RtScene& out);
 
+    void                      preFrameUpdateWind (uint8_t fId, const bool* upd);
+    void                      preFrameUpdateMorph(uint8_t fId, const bool* upd);
     virtual void              preFrameUpdate(uint8_t fId);
     virtual void              drawHiZ    (Tempest::Encoder<Tempest::CommandBuffer> &cmd, uint8_t fId);
     void                      draw       (Tempest::Encoder<Tempest::CommandBuffer>& cmd, uint8_t fId);
@@ -137,7 +141,6 @@ class ObjectsBucket {
       L_SceneClr = 10,
       L_GDepth   = 11,
       L_HiZ      = 12,
-      L_SkyLut   = 13,
       };
 
     struct ShLight final {
@@ -155,17 +158,24 @@ class ObjectsBucket {
       uint16_t intensity;
       };
 
-    struct UboPushBase {
-      uint32_t  meshletBase        = 0;
-      int32_t   meshletPerInstance = 0;
-      uint32_t  firstInstance      = 0;
-      uint32_t  instanceCount      = 0;
-      float     fatness            = 0;
-      float     padd[3]            = {};
+    struct UboPush {
+      uint32_t  firstMeshlet  = 0;
+      int32_t   meshletCount  = 0;
+      uint32_t  firstInstance = 0;
+      uint32_t  instanceCount = 0;
       };
 
-    struct UboPush : UboPushBase {
+    struct MorphData {
       MorphDesc morph[Resources::MAX_MORPH_LAYERS];
+      };
+
+    struct InstanceDesc {
+      void     setPosition(const Tempest::Matrix4x4& m);
+      float    pos[4][3] = {};
+      float    fatness   = 0;
+      uint32_t animPtr   = 0;
+      uint32_t padd0     = {};
+      uint32_t padd1     = {};
       };
 
     struct BucketDesc final {
@@ -173,6 +183,8 @@ class ObjectsBucket {
       Tempest::Point texAniMapDirPeriod;
       float          bboxRadius = 0;
       float          waveMaxAmplitude = 0;
+      float          alphaWeight = 1;
+      float          envMapping = 0;
       };
 
     struct Descriptors final {
@@ -198,7 +210,7 @@ class ObjectsBucket {
       float                                 windIntensity = 0;
       uint64_t                              timeShift=0;
 
-      const MatrixStorage::Id*              skiningAni = nullptr;
+      const InstanceStorage::Id*            skiningAni = nullptr;
       MorphAnim                             morphAnim[Resources::MAX_MORPH_LAYERS];
       const Tempest::AccelerationStructure* blas = nullptr;
 
@@ -210,7 +222,7 @@ class ObjectsBucket {
     virtual Object&           implAlloc(const Bounds& bounds, const Material& mat);
     virtual void              postAlloc(Object& obj, size_t objId);
     virtual void              implFree(const size_t objId);
-    Bucket                    allocBucketDesc(const Material& mat);
+    Bucket                    allocBucketDesc(const Bounds& bounds, const Material& mat);
 
     void                      uboSetCommon  (Descriptors& v, const Material& mat, const Bucket& bucket);
     void                      uboSetSkeleton(Descriptors& v, uint8_t fId);
@@ -227,7 +239,9 @@ class ObjectsBucket {
     bool                      isForwardShading() const;
     bool                      isShadowmapRequired() const;
     bool                      isSceneInfoRequired() const;
-    void                      updatePushBlock(UboPush& push, Object& v, uint32_t instance, uint32_t instanceCount);
+    void                      updatePushBlock(UboPush& push, Object& v, uint32_t instance, uint32_t id, uint32_t instanceCount);
+
+    void                      updateInstance(size_t instance, const Object& v);
     void                      reallocObjPositions();
     void                      invalidateInstancing();
     uint32_t                  applyInstancing(size_t& i, const size_t* index, size_t indSz) const;
@@ -241,7 +255,6 @@ class ObjectsBucket {
     virtual const Material&   material(size_t i) const;
     std::pair<uint32_t,uint32_t> meshSlice(size_t i) const;
 
-    Tempest::BufferHeap       ssboHeap() const;
     static Type               sanitizeType(const Type t, const Material& mat, const StaticMesh* st);
 
     const Type                objType          = Type::Landscape;
@@ -254,8 +267,10 @@ class ObjectsBucket {
     VisibleSet                visSet;
 
     Object                    val[CAPACITY];
-    size_t                    valSz = 0;
-    MatrixStorage::Id         objPositions;
+    size_t                    valSz  = 0; // count
+    size_t                    valLen = 0; // last valid index
+    InstanceStorage::Id       objInstances;
+    InstanceStorage::Id       objMorphAnim;
 
     bool                      useMeshlets         = false;
     bool                      textureInShadowPass = false;
@@ -291,9 +306,9 @@ class ObjectsBucketDyn : public ObjectsBucket {
     void         setPfxData  (size_t i, const Tempest::StorageBuffer* ssbo, uint8_t fId) override;
     const Material& material(size_t i) const override;
 
-    void         setupUbo() override;
+    void         prepareUniforms() override;
     void         invalidateUbo(uint8_t fId) override;
-    void         fillTlas(std::vector<Tempest::RtInstance>& inst, std::vector<uint32_t>& iboOff, Bindless& out) override;
+    void         fillTlas(RtScene& out) override;
 
     void         invalidateDyn();
 

@@ -13,9 +13,12 @@ static Tempest::Color toColor(glm::u8vec4 v) {
 Material::Material(const phoenix::material& m, bool enableAlphaTest) {
   tex = Resources::loadTexture(m.texture);
   if(tex==nullptr) {
-    if(!m.texture.empty())
-      tex = Resources::loadTexture("DEFAULT.TGA"); else
+    if(!m.texture.empty()) {
+      tex = Resources::loadTexture("DEFAULT.TGA");
+      } else {
       tex = Resources::loadTexture(toColor(m.color));
+      enableAlphaTest &= (m.color.a!=255);
+      }
     }
 
   loadFrames(m);
@@ -38,7 +41,7 @@ Material::Material(const phoenix::material& m, bool enableAlphaTest) {
     waveMaxAmplitude = m.wave_max_amplitude;
 
   if(m.environment_mapping!=0)
-    envMapping = m.environment_mapping_strength;
+    ; // envMapping = m.environment_mapping_strength;
   }
 
 Material::Material(const phoenix::vob& vob) {
@@ -50,6 +53,7 @@ Material::Material(const phoenix::vob& vob) {
 
   texAniFPSInv = 1000/std::max<size_t>(frames.size(),1);
   alpha        = loadAlphaFunc(vob.visual_decal->alpha_func,phoenix::material_group::undefined,vob.visual_decal->alpha_weight,tex,true);
+  alphaWeight  = float(vob.visual_decal->alpha_weight)/255.f;
 
   if(vob.visual_decal->texture_anim_fps>0)
     texAniFPSInv = uint64_t(1000.f/vob.visual_decal->texture_anim_fps); else
@@ -92,10 +96,12 @@ bool Material::operator >(const Material& other) const {
 bool Material::operator ==(const Material& other) const {
   return tex==other.tex &&
          alpha==other.alpha &&
+         alphaWeight==other.alphaWeight &&
          texAniMapDirPeriod==other.texAniMapDirPeriod &&
          texAniFPSInv==other.texAniFPSInv &&
          isGhost==other.isGhost &&
-         waveMaxAmplitude==other.waveMaxAmplitude;
+         waveMaxAmplitude==other.waveMaxAmplitude &&
+         envMapping==other.envMapping;
   }
 
 bool Material::isSolid() const {
@@ -142,7 +148,8 @@ Material::AlphaFunc Material::loadAlphaFunc(phoenix::alpha_function zenAlpha,
     case phoenix::alpha_function::mul2:
       alpha = Material::AlphaFunc::Multiply2;
       break;
-    default:
+    case phoenix::alpha_function::default_:
+    case phoenix::alpha_function::none:
       alpha = Material::AlphaFunc::AlphaTest;
       break;
     }
@@ -150,12 +157,21 @@ Material::AlphaFunc Material::loadAlphaFunc(phoenix::alpha_function zenAlpha,
   if(matGroup == phoenix::material_group::water)
     alpha = Material::AlphaFunc::Water;
 
+  if(clrAlpha!=255 && alpha==Material::AlphaFunc::Solid) {
+    alpha = Material::AlphaFunc::Transparent;
+    }
+
   if(alpha==Material::AlphaFunc::AlphaTest || alpha==Material::AlphaFunc::Transparent) {
-    if(tex!=nullptr && tex->format()==Tempest::TextureFormat::DXT1) {
-      if(clrAlpha==255)
-        alpha = Material::AlphaFunc::Solid; else
-        alpha = Material::AlphaFunc::Transparent;
+    if(tex!=nullptr && tex->format()==Tempest::TextureFormat::DXT1 && clrAlpha==255) {
+      alpha = Material::AlphaFunc::Solid;
       }
+    }
+
+  if(alpha==Material::AlphaFunc::AlphaTest || alpha==Material::AlphaFunc::AdditiveLight) {
+    // castle wall in G1 (OW_DIRTDECAL.TGA) has alpha==0, set it to mul for now
+    // if(clrAlpha==0) {
+    //    alpha = Material::AlphaFunc::Multiply;
+    //   }
     }
 
   if(alpha == Material::AlphaFunc::AlphaTest && !enableAlphaTest) {

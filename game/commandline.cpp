@@ -4,6 +4,7 @@
 #include <Tempest/TextCodec>
 #include <cstring>
 #include <filesystem>
+#include <cassert>
 
 #include "utils/installdetect.h"
 #include "utils/fileutil.h"
@@ -13,6 +14,22 @@ using namespace Tempest;
 using namespace FileUtil;
 
 static CommandLine* instance = nullptr;
+
+static const char16_t* toString(ScriptLang lang) {
+  switch(lang) {
+    case ScriptLang::EN: return u"Scripts_EN";
+    case ScriptLang::DE: return u"Scripts_DE";
+    case ScriptLang::PL: return u"Scripts_PL";
+    case ScriptLang::RU: return u"Scripts_RU";
+    case ScriptLang::FR: return u"Scripts_FR";
+    case ScriptLang::ES: return u"Scripts_ES";
+    case ScriptLang::IT: return u"Scripts_IT";
+    case ScriptLang::CZ: return u"Scripts_CZ";
+    case ScriptLang::NONE:
+      break;
+    }
+  return u"Scripts";
+  }
 
 CommandLine::CommandLine(int argc, const char** argv) {
   instance = this;
@@ -60,8 +77,11 @@ CommandLine::CommandLine(int argc, const char** argv) {
     else if(arg=="-g1") {
       forceG1 = true;
       }
-    else if(arg=="-g2") {
+    else if(arg=="-g2c") {
       forceG2 = true;
+      }
+    else if(arg=="-g2") {
+      forceG2NR = true;
       }
     else if(arg=="-dx12") {
       graphics = GraphicBackend::DirectX12;
@@ -74,6 +94,11 @@ CommandLine::CommandLine(int argc, const char** argv) {
       if(i<argc)
         isRQuery = (std::string_view(argv[i])!="0" && std::string_view(argv[i])!="false");
       }
+    else if(arg=="-gi") {
+      ++i;
+      if(i<argc)
+        isGi = (std::string_view(argv[i])!="0" && std::string_view(argv[i])!="false");
+      }
     else if(arg=="-ms") {
       ++i;
       if(i<argc)
@@ -84,7 +109,7 @@ CommandLine::CommandLine(int argc, const char** argv) {
   if(gpath.empty()) {
     InstallDetect inst;
     gpath = inst.detectG2();
-#ifdef __OSX__
+#if defined(__APPLE__)
     if(!gpath.empty() && gpath==inst.applicationSupportDirectory()) {
       std::filesystem::current_path(gpath);
       }
@@ -98,7 +123,9 @@ CommandLine::CommandLine(int argc, const char** argv) {
   if(gpath.size()>0 && gpath.back()!='/')
     gpath.push_back('/');
 
-  gscript = nestedPath({u"_work",u"Data",u"Scripts",u"_compiled"},Dir::FT_Dir);
+  gscript   = nestedPath({u"_work",u"Data",u"Scripts",   u"_compiled"},Dir::FT_Dir);
+  gcutscene = nestedPath({u"_work",u"Data",u"Scripts",   u"content",u"CUTSCENE"},Dir::FT_Dir);
+
   gmod    = TextCodec::toUtf16(std::string(mod));
   if(!gmod.empty())
     gmod = nestedPath({u"system",gmod.c_str()},Dir::FT_File);
@@ -110,6 +137,7 @@ CommandLine::CommandLine(int argc, const char** argv) {
   }
 
 const CommandLine& CommandLine::inst() {
+  assert(instance!=nullptr);
   return *instance;
   }
 
@@ -121,8 +149,22 @@ std::u16string_view CommandLine::rootPath() const {
   return gpath;
   }
 
-std::u16string_view CommandLine::scriptPath() const {
+std::u16string CommandLine::scriptPath() const {
   return gscript;
+  }
+
+std::u16string CommandLine::scriptPath(ScriptLang lang) const {
+  const char16_t* scripts = toString(lang);
+  return nestedPath({u"_work",u"Data",scripts,u"_compiled"},Dir::FT_Dir);
+  }
+
+std::u16string CommandLine::cutscenePath() const {
+  return gcutscene;
+  }
+
+std::u16string CommandLine::cutscenePath(ScriptLang lang) const {
+  const char16_t* scripts = toString(lang);
+  return nestedPath({u"_work",u"Data",scripts},Dir::FT_Dir);
   }
 
 std::u16string CommandLine::nestedPath(const std::initializer_list<const char16_t*>& name, Tempest::Dir::FileType type) const {
